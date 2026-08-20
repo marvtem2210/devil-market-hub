@@ -22,8 +22,11 @@
     F9  = SCAN — dump objek + prompt ke konsol
     F10 = Matikan SEMUA fitur
 
-  Catatan: buat deteksi/save remote, jalankan remote_spy.lua
-  terpisah — script ini gak butuh itu buat jalan.
+  MODE HYBRID: kalau remote_spy.lua jalan barengan, hub otomatis
+  baca _G.DMHubRemoteData dan replay remote + args asli yang
+  ke-tangkep spy (lebih akurat dari prompt). Gak ada data / data
+  basi (>10 menit) → fallback ProximityPrompt kayak biasa.
+  Urutan: load spy → gerak normal biar args ke-log → nyalain auto.
   ============================================================
 ]]
 
@@ -42,6 +45,9 @@ local Config = {
     ScanRadius        = 30,
     ActionDelay       = 0.35,
     LoopInterval      = 2.0,
+    UseSpyRemote      = true,   -- pakai remote data dari remote_spy kalau ada
+    SpyRemoteDelay    = 0.2,    -- jeda antar replay remote
+    SpyDataFreshness  = 600,    -- detik; data spy dianggap basi setelah ini
     EspPlayerColor    = Color3.fromRGB(255, 80, 80),
     EspItemColor      = Color3.fromRGB(80, 255, 120),
     DefaultWalkSpeed  = 16,
@@ -167,6 +173,63 @@ local function findPartsByKeywords(keywords)
 end
 
 -- ============================================================
+-- REMOTE REPLAY — baca hasil map dari remote_spy (_G)
+-- ============================================================
+local spyCache = {}  -- path -> Remote (cache resolve biar gak scan terus)
+
+local function resolveRemoteByPath(path)
+    if spyCache[path] and spyCache[path].Parent then return spyCache[path] end
+    spyCache[path] = nil
+    for _, obj in ipairs(game:GetDescendants()) do
+        if obj:GetFullName() == path then
+            spyCache[path] = obj
+            return obj
+        end
+    end
+    return nil
+end
+
+-- Tembak satu remote dengan args
+local function fireRemote(remote, ...)
+    if not remote or not remote.Parent then return false end
+    local args = {...}
+    local ok, err = pcall(function()
+        if remote:IsA("RemoteEvent") then
+            remote:FireServer(unpack(args))
+        elseif remote:IsA("RemoteFunction") then
+            remote:InvokeServer(unpack(args))
+        end
+    end)
+    if not ok then
+        log("fireRemote error: " .. tostring(err))
+    end
+    return ok
+end
+
+-- Replay remote yang di-map remote_spy untuk satu kategori.
+-- Hanya fire remote yang PUNYA sample args (pernah ke-fire game asli).
+-- Return true kalau minimal 1 fire sukses → loop skip prompt.
+local function fireSpyCategory(category)
+    local shared = _G and _G.DMHubRemoteData
+    if type(shared) ~= "table" then return false end
+    -- Data basi → anggap spy gak jalan, balik ke prompt
+    if os.clock() - (shared.updated or 0) > Config.SpyDataFreshness then return false end
+    local data = shared[category]
+    if type(data) ~= "table" or #data == 0 then return false end
+    local fired = false
+    for _, e in ipairs(data) do
+        if e.lastArgsRaw and e.path then
+            local remote = resolveRemoteByPath(e.path)
+            if remote and fireRemote(remote, unpack(e.lastArgsRaw)) then
+                fired = true
+                task.wait(Config.SpyRemoteDelay)
+            end
+        end
+    end
+    return fired
+end
+
+-- ============================================================
 -- STATE & LOOP ENGINE
 -- ============================================================
 local State = {
@@ -177,19 +240,28 @@ local State = {
 local activeLoops = {}
 
 -- Loop generik — interaksi ProximityPrompt murni
-local function runAutoLoop(key, promptKeywords)
+local function runAutoLoop(key, remoteCategory, promptKeywords)
     if activeLoops[key] then return end
     activeLoops[key] = task.spawn(function()
         while State[key] do
             pcall(function()
-                equipTool()
-                local items = getPromptsInRadius(Config.ScanRadius)
-                for _, item in ipairs(items) do
-                    if not State[key] then break end
-                    local pname = (item.prompt.Name or "") .. " " .. (item.part.Name or "")
-                    if #promptKeywords == 0 or matchesKeywords(pname, promptKeywords) then
-                        interactWith(item.prompt)
-                        task.wait(Config.ActionDelay)
+                -- 1) Replay remote dari remote_spy (kalau ada datanya)
+                local firedViaRemote = false
+                if Config.UseSpyRemote then
+                    firedViaRemote = fireSpyCategory(remoteCategory)
+                end
+
+                -- 2) Fallback: ProximityPrompt
+                if not firedViaRemote then
+                    equipTool()
+                    local items = getPromptsInRadius(Config.ScanRadius)
+                    for _, item in ipairs(items) do
+                        if not State[key] then break end
+                        local pname = (item.prompt.Name or "") .. " " .. (item.part.Name or "")
+                        if #promptKeywords == 0 or matchesKeywords(pname, promptKeywords) then
+                            interactWith(item.prompt)
+                            task.wait(Config.ActionDelay)
+                        end
                     end
                 end
             end)
@@ -200,10 +272,10 @@ local function runAutoLoop(key, promptKeywords)
 end
 
 local function startAutoLoops()
-    if State.autoFarm  then runAutoLoop("autoFarm",  Config.FarmKeywords)  end
-    if State.autoCook  then runAutoLoop("autoCook",  Config.CookKeywords)  end
-    if State.autoServe then runAutoLoop("autoServe", Config.ServeKeywords) end
-    if State.autoBuy   then runAutoLoop("autoBuy",   Config.BuyKeywords)   end
+    if State.autoFarm  then runAutoLoop("autoFarm",  "farm",  Config.FarmKeywords)  end
+    if State.autoCook  then runAutoLoop("autoCook",  "cook",  Config.CookKeywords)  end
+    if State.autoServe then runAutoLoop("autoServe", "serve", Config.ServeKeywords) end
+    if State.autoBuy   then runAutoLoop("autoBuy",   "buy",   Config.BuyKeywords)   end
 end
 
 local function setFeature(key, enabled, label)
@@ -557,4 +629,7 @@ print("  F2  Auto-Cook     F7  ESP")
 print("  F3  Auto-Serve    F8  Teleport")
 print("  F4  Auto-Buy      F9  SCAN")
 print("  F5  Speed Boost   F10 Matikan Semua")
+print("------------------------------------------")
+print("  Mode Hybrid: remote dari remote_spy (kalau ada)")
+print("  → replay remote + args asli, fallback ke prompt")
 print("==========================================")

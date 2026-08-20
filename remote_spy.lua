@@ -17,8 +17,13 @@
     F11  = Dump RemoteMap ke konsol + save ke file
     F12  = Reset RemoteMap + scan ulang
 
-  Catatan: ini murni untuk INSPEKSI — gak ada auto-farm di
-  sini. Jalankan bareng devil_market_hub.lua kalau mau dua-duanya.
+  Catatan: ini murni untuk INSPEKSI — gak ada auto-farm di sini.
+
+  INTEGRASI HUB: hasil map di-share lewat _G.DMHubRemoteData.
+  Kalau devil_market_hub.lua jalan barengan, hub otomatis
+  replay remote + args asli yang ke-tangkep (sebelum fallback
+  ke ProximityPrompt). Urutan: load spy → gerak normal biar
+  args ke-log → baru nyalain auto di hub.
   ============================================================
 ]]
 
@@ -94,6 +99,34 @@ local function notify(title, text, duration)
 end
 
 -- ============================================================
+-- SHARED DATA — dibaca devil_market_hub.lua
+-- ============================================================
+-- _G.DMHubRemoteData:
+--   farm/cook/serve/buy = { { path, className, name, fireCount,
+--                             lastArgsRaw, lastArgsStr, lastTime } }
+--   updated = os.clock() terakhir spy update (freshness check hub)
+_G.DMHubRemoteData = _G.DMHubRemoteData or {
+    farm = {}, cook = {}, serve = {}, buy = {},
+    updated = 0,
+}
+
+local RAW_ARGS_CAP = 8  -- maksimal argumen asli yang disimpan per remote
+
+local function syncSpyData()
+    _G.DMHubRemoteData.updated = os.clock()
+end
+
+-- Kategori remote (satu sumber kebenaran: categorize + sync)
+local function remoteCategoryOf(remote)
+    local name = lower(remote.Name)
+    if matchesKeywords(name, Config.RemoteFarmKw) then return "farm" end
+    if matchesKeywords(name, Config.RemoteCookKw) then return "cook" end
+    if matchesKeywords(name, Config.RemoteServeKw) then return "serve" end
+    if matchesKeywords(name, Config.RemoteBuyKw) then return "buy" end
+    return nil
+end
+
+-- ============================================================
 -- SERIALIZE ARG (buat logging)
 -- ============================================================
 local FormatArg
@@ -134,7 +167,6 @@ end
 -- Kategorikan satu remote ke RemoteMap
 local function categorizeRemote(remote)
     local path = remote:GetFullName()
-    local name = lower(remote.Name)
 
     -- Cek duplikat di all
     for _, r in ipairs(RemoteMap.all) do
@@ -142,21 +174,34 @@ local function categorizeRemote(remote)
     end
     table.insert(RemoteMap.all, remote)
 
-    -- Kategorikan
-    if matchesKeywords(name, Config.RemoteFarmKw) then
-        table.insert(RemoteMap.farm, remote)
-        log("REMOTE [FARM] " .. path)
-    elseif matchesKeywords(name, Config.RemoteCookKw) then
-        table.insert(RemoteMap.cook, remote)
-        log("REMOTE [COOK] " .. path)
-    elseif matchesKeywords(name, Config.RemoteServeKw) then
-        table.insert(RemoteMap.serve, remote)
-        log("REMOTE [SERVE] " .. path)
-    elseif matchesKeywords(name, Config.RemoteBuyKw) then
-        table.insert(RemoteMap.buy, remote)
-        log("REMOTE [BUY] " .. path)
+    -- Kategorikan (satu sumber kebenaran)
+    local cat = remoteCategoryOf(remote)
+    if cat then
+        table.insert(RemoteMap[cat], remote)
+        log(("REMOTE [%s] "):format(string.upper(cat)) .. path)
     else
         log("REMOTE [?] " .. path)
+    end
+
+    -- Sync ke shared data (dibaca hub)
+    if cat then
+        local data = _G.DMHubRemoteData[cat]
+        local exists
+        for _, e in ipairs(data) do
+            if e.path == path then exists = true break end
+        end
+        if not exists then
+            table.insert(data, {
+                path        = path,
+                className   = remote.ClassName,
+                name        = remote.Name,
+                fireCount   = 0,
+                lastArgsRaw = nil,
+                lastArgsStr = "",
+                lastTime    = "",
+            })
+            syncSpyData()
+        end
     end
 end
 
@@ -231,6 +276,27 @@ local function initHook()
                 method = method,
                 args   = table.concat(argStrs, ", "),
             })
+
+            -- Update shared data (raw args biar hub bisa replay)
+            local path = self:GetFullName()
+            for catName, catData in pairs(_G.DMHubRemoteData) do
+                if catName ~= "updated" and type(catData) == "table" then
+                    for _, e in ipairs(catData) do
+                        if e.path == path then
+                            e.fireCount = e.fireCount + 1
+                            e.lastArgsStr = table.concat(argStrs, ", ")
+                            e.lastTime = os.date("%H:%M:%S")
+                            local raw = {}
+                            for i = 1, math.min(#args, RAW_ARGS_CAP) do
+                                raw[i] = args[i]
+                            end
+                            e.lastArgsRaw = raw
+                            syncSpyData()
+                            break
+                        end
+                    end
+                end
+            end
         end
 
         -- Selalu panggil original — jangan pernah block
@@ -401,4 +467,7 @@ task.spawn(startAutoSave)
 print("  F9  Dump Remote Map")
 print("  F11 Dump + Save ke file")
 print("  F12 Rescan Remote")
+print("------------------------------------------")
+print("  Data di-share ke hub via _G.DMHubRemoteData")
+print("  (jalanin devil_market_hub.lua buat auto pakai remote)")
 print("==========================================")
