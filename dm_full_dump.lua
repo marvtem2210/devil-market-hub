@@ -372,12 +372,13 @@ local function initHook()
         print("[FULLDUMP] hookmetamethod gak ada — log live skip, dump statis tetap jalan")
         return
     end
-    local old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+    local wrap = newcclosure or function(f) return f end
+    local old = hookmetamethod(game, "__namecall", wrap(function(self, ...)
+        local args = {...}
         pcall(function()
             local method = getnamecallmethod()
             if (method == "FireServer" or method == "InvokeServer")
             and (self:IsA("RemoteEvent") or self:IsA("RemoteFunction")) then
-                local args = {...}
                 local strs = {}
                 for i = 1, math.min(#args, 12) do
                     strs[i] = FormatArg(args[i])

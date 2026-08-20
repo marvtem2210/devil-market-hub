@@ -43,7 +43,8 @@ local BLOCKED_NAMES = {
 }
 
 -- 3) SIMPAN OLD — WAJIB. Kalau gak, gak ada jalan balik.
-local oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+local wrap = newcclosure or function(f) return f end
+local oldNamecall = hookmetamethod(game, "__namecall", wrap(function(self, ...)
     local blocked = false
 
     -- pcall: kalau isi hook error, game gak ikut crash

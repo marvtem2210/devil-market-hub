@@ -132,6 +132,9 @@ local function remoteCategoryOf(remote)
     return nil
 end
 
+-- Forward declaration: pushFeed didefinisikan di section UI (di bawah)
+local pushFeed
+
 -- ============================================================
 -- SERIALIZE ARG (buat logging)
 -- ============================================================
@@ -457,7 +460,7 @@ end
 local feed = {}
 local FEED_MAX = 60
 
-local function pushFeed(text)
+pushFeed = function(text)
     table.insert(feed, { time = os.date("%H:%M:%S"), text = text })
     if #feed > FEED_MAX then table.remove(feed, 1) end
     if SpyUI.feedLabel then

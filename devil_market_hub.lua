@@ -238,6 +238,9 @@ end
 -- KAITUN PHASE — baca keputusan dari kaitun_engine.lua
 -- ============================================================
 -- Hub jadi "tangan": nyalain/matiin fitur sesuai phase engine.
+-- Forward: di-assign ke setFeature setelah setFeature didefinisikan.
+local kaitunSetFeature
+
 local function kaitunPhase()
     local k = _G and _G.DMKaitun
     if not k or not k.running then return nil end
@@ -262,7 +265,7 @@ local function syncKaitun()
     if not wanted then return end
     for feature, enabled in pairs(wanted) do
         if State[feature] ~= enabled then
-            setFeature(feature, enabled, "KAITUN")
+            if kaitunSetFeature then kaitunSetFeature(feature, enabled, "KAITUN") end
         end
     end
 end
@@ -328,6 +331,9 @@ local function setFeature(key, enabled, label)
     log(label .. " " .. (enabled and "ON" or "OFF"))
     if enabled then startAutoLoops() end
 end
+
+-- Wire kaitun sync ke setFeature (didefinisikan di atas)
+kaitunSetFeature = setFeature
 
 -- ============================================================
 -- SPEED

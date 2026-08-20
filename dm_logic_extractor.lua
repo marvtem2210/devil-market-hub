@@ -122,7 +122,7 @@ end
 -- UI — touch friendly
 -- ============================================================
 local UI = {}
-local screen, frame, listFrame, viewFrame, viewBox
+local screen, frame, listFrame, viewFrame, viewBox, currentEntry, renderList
 
 local function clearList()
     if listFrame then
@@ -265,6 +265,7 @@ local function buildUI()
     vScroll.BackgroundColor3  = Color3.fromRGB(12, 12, 16)
     vScroll.BorderSizePixel   = 0
     vScroll.ScrollBarThickness = 8
+    vScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
     vScroll.Parent            = viewFrame
 
     viewBox = Instance.new("TextLabel")
@@ -279,7 +280,7 @@ local function buildUI()
     viewBox.TextXAlignment    = Enum.TextXAlignment.Left
     viewBox.TextYAlignment    = Enum.TextYAlignment.Top
     viewBox.AutomaticSize     = Enum.AutomaticSize.Y
-    viewBox.TextWrapped       = false
+    viewBox.TextWrapped       = true
     viewBox.Parent            = vScroll
 
     -- Button bar bawah (view)
@@ -306,7 +307,6 @@ local function buildUI()
     vBtns.BackgroundTransparency = 1
     vBtns.Parent          = viewFrame
 
-    local currentEntry = nil
     makeBtn(vBtns, "< Kembali", 0, function()
         currentEntry = nil
         showList()
@@ -379,7 +379,7 @@ local function buildUI()
     print("[LogicExtractor] UI aktif. " .. #found .. " modul.")
 end
 
-local function renderList()
+renderList = function()
     clearList()
     if #found == 0 then
         local empty = Instance.new("TextLabel")

@@ -43,6 +43,8 @@ local Config = {
     TickInterval   = 3,        -- detik tiap keputusan phase
     StockThreshold = 10,       -- stok minimal tiap bahan sebelum COOK
     MinProfit      = 5,        -- minimum produk siap jual sebelum SERVE
+    CookTicks      = 4,        -- berapa tick phase COOK bertahan (12 detik)
+    ServeTicks     = 4,        -- berapa tick phase SERVE bertahan (12 detik)
 
     -- Resep yang mau dikejar. ISI nanti setelah probe/DEX
     -- ngasih tau nama bahan & produk asli di game.
@@ -73,21 +75,27 @@ local function readStock(materialName)
     return Stock.learned[materialName] or 0
 end
 
--- Mode belajar: ekstrak angka + kata dari args remote yang ke-tangkep spy.
+-- Mode belajar: ekstrak angka + kata dari ARGS ASLI yang ke-tangkep spy
+-- (field lastArgsStr di tiap kategori _G.DMHubRemoteData).
 -- Naive tapi cukup buat nebak bahan yang muncul di remote call.
 local function spyLearn()
     pcall(function()
         local shared = _G and _G.DMHubRemoteData
         if type(shared) ~= "table" then return end
-        for _, e in ipairs(shared.logs or {}) do
-            local argsStr = e.args or ""
-            -- cari pola "NamaBahan=123" atau "123" deket kata bahan
-            for mat, qty in string.gmatch(argsStr, "([%a_]+)%s*=%s*(%d+)") do
-                mat = string.lower(mat)
-                if #mat > 2 and not Stock.known[mat] then
-                    Stock.known[mat] = true
-                    Stock.learned[mat] = tonumber(qty) or 0
-                    print("[KAITUN] belajar bahan: " .. mat .. " = " .. qty)
+        for _, cat in ipairs({ "farm", "cook", "serve", "buy" }) do
+            local data = shared[cat]
+            if type(data) == "table" then
+                for _, e in ipairs(data) do
+                    local argsStr = e.lastArgsStr or ""
+                    -- cari pola "NamaBahan=123"
+                    for mat, qty in string.gmatch(argsStr, "([%a_]+)%s*=%s*(%d+)") do
+                        mat = string.lower(mat)
+                        if #mat > 2 then
+                            Stock.known[mat] = true
+                            Stock.learned[mat] = tonumber(qty) or 0
+                            print("[KAITUN] belajar bahan: " .. mat .. " = " .. qty)
+                        end
+                    end
                 end
             end
         end
@@ -147,9 +155,10 @@ local Phase = {
 }
 
 local engine = {
-    phase    = Phase.GATHER,
-    reason   = "mulai",
-    lastTick = 0,
+    phase        = Phase.GATHER,
+    reason       = "mulai",
+    lastTick     = 0,
+    ticksInPhase = 0,
 }
 
 -- Share ke hub & UI
@@ -165,6 +174,7 @@ local function setPhase(p, reason)
     if engine.phase ~= p then
         engine.phase  = p
         engine.reason = reason
+        engine.ticksInPhase = 0
         print(string.format("[KAITUN] PHASE %s — %s", p, reason))
         publish()
     end
@@ -173,6 +183,8 @@ end
 local function tick()
     refreshStock()
     publish()
+
+    engine.ticksInPhase = engine.ticksInPhase + 1
 
     if engine.phase == Phase.GATHER then
         if hasAllMaterials() then
@@ -186,15 +198,20 @@ local function tick()
     elseif engine.phase == Phase.COOK then
         if not hasAllMaterials() then
             setPhase(Phase.GATHER, "bahan abis, balik kumpulin")
+        elseif engine.ticksInPhase >= Config.CookTicks then
+            setPhase(Phase.SERVE, "produk numpuk, mulai jual")
         else
-            -- Masak sampe produk numpuk (MinProfit). Belum ada cara
-            -- baca produk jadi → kita cook beberapa tick dulu.
-            engine.reason = "masak..."
+            engine.reason = ("masak... (%d/%d)"):format(engine.ticksInPhase, Config.CookTicks)
             publish()
         end
 
     elseif engine.phase == Phase.SERVE then
-        setPhase(Phase.GATHER, "produk abis, mulai dari awal")
+        if engine.ticksInPhase >= Config.ServeTicks then
+            setPhase(Phase.GATHER, "produk abis, mulai dari awal")
+        else
+            engine.reason = ("jual... (%d/%d)"):format(engine.ticksInPhase, Config.ServeTicks)
+            publish()
+        end
     end
 end
 
