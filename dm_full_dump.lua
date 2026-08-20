@@ -23,12 +23,26 @@
 local Players = game:GetService("Players")
 local LP = Players.LocalPlayer
 
+-- State yang di-share ke UI
+local DumpState = {
+    phase     = "idle",      -- idle / tree / remotes / stats / logic / hook / done
+    files     = {},          -- { name, size }
+    remotes   = 0,
+    scripts   = 0,
+    logsCount = 0,
+    startedAt = os.clock(),
+}
+
 local function saveFile(name, content)
     local ok, err = pcall(function()
         writefile(name, content)
     end)
     if ok then
         print("[FULLDUMP] OK  " .. name .. "  (" .. math.floor(#content / 1024) .. " KB)")
+        DumpState.files[#DumpState.files+1] = {
+            name = name,
+            size = math.floor(#content / 1024),
+        }
     else
         print("[FULLDUMP] GAGAL " .. name .. "  " .. tostring(err))
     end
@@ -136,6 +150,7 @@ local function dumpRemotes()
     lines[#lines+1] = "-- SEMUA (urut) --"
     for _, l in ipairs(all) do lines[#lines+1] = "  " .. l end
     saveFile("dm_remotes.txt", table.concat(lines, "\n"))
+    DumpState.remotes = #all
 
     -- Share ke _G buat hub/spy kalau ada
     pcall(function()
@@ -313,6 +328,7 @@ local function dumpLogic()
 
     saveFile("dm_logic_all.txt", table.concat(combined, "\n"))
     saveFile("dm_logic_everything.txt", table.concat(everything, "\n"))
+    DumpState.scripts = total
     print(string.format("[FULLDUMP] total script: %d | match: %d file terpisah | gabungan: %.1f MB",
         total, savedSeparate, everythingSize / 1048576))
 end
@@ -358,6 +374,7 @@ local function flushLogs()
         lines[#lines+1] = ("[%s] %s:%s(%s)"):format(e.time, e.path, e.method, e.args)
     end
     logs = {}
+    DumpState.logsCount = DumpState.logsCount + #lines
     local ok = pcall(function()
         local prev = readfile and readfile("dm_remote_logs.txt") or ""
         writefile("dm_remote_logs.txt", prev .. table.concat(lines, "\n") .. "\n")
@@ -406,6 +423,145 @@ task.spawn(function()
 end)
 
 -- ============================================================
+-- UI — panel status (HP friendly)
+-- ============================================================
+local UI = {}
+
+local function buildUI()
+    local existing = LP:FindFirstChild("PlayerGui") and LP.PlayerGui:FindFirstChild("DumpUI")
+    if existing then existing:Destroy() end
+    local PlayerGui = LP:WaitForChild("PlayerGui", 10)
+    if not PlayerGui then return end
+
+    local screen = Instance.new("ScreenGui")
+    screen.Name           = "DumpUI"
+    screen.ResetOnSpawn   = false
+    screen.DisplayOrder   = 995
+    screen.IgnoreGuiInset = true
+    screen.Parent         = PlayerGui
+
+    local frame = Instance.new("Frame")
+    frame.Name            = "Main"
+    frame.Size            = UDim2.new(0, 260, 0, 240)
+    frame.Position        = UDim2.new(1, -270, 0, 45)
+    frame.BackgroundColor3 = Color3.fromRGB(14, 14, 18)
+    frame.BorderSizePixel = 0
+    frame.Active          = true
+    frame.Draggable       = true
+    frame.Parent          = screen
+
+    local title = Instance.new("TextLabel")
+    title.Size            = UDim2.new(1, -28, 0, 24)
+    title.Position        = UDim2.new(0, 4, 0, 0)
+    title.BackgroundTransparency = 1
+    title.Text            = "FULL DUMP"
+    title.TextColor3      = Color3.fromRGB(255, 200, 120)
+    title.TextSize        = 13
+    title.Font            = Enum.Font.GothamBold
+    title.TextXAlignment  = Enum.TextXAlignment.Left
+    title.Parent          = frame
+
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size         = UDim2.new(0, 24, 0, 24)
+    closeBtn.Position     = UDim2.new(1, -26, 0, 0)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+    closeBtn.BorderSizePixel = 0
+    closeBtn.Text         = "X"
+    closeBtn.TextColor3   = Color3.fromRGB(255,255,255)
+    closeBtn.TextSize     = 11
+    closeBtn.Font         = Enum.Font.GothamBold
+    closeBtn.Parent       = frame
+    closeBtn.MouseButton1Click:Connect(function() screen:Destroy() end)
+
+    local status = Instance.new("TextLabel")
+    status.Name           = "Status"
+    status.Size           = UDim2.new(1, -8, 0, 80)
+    status.Position       = UDim2.new(0, 4, 0, 26)
+    status.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+    status.BorderSizePixel = 0
+    status.Text           = "phase: idle"
+    status.TextColor3     = Color3.fromRGB(200, 220, 200)
+    status.TextSize       = 11
+    status.Font           = Enum.Font.Gotham
+    status.TextXAlignment = Enum.TextXAlignment.Left
+    status.TextYAlignment = Enum.TextYAlignment.Top
+    status.TextWrapped    = true
+    status.Parent         = frame
+
+    local files = Instance.new("TextLabel")
+    files.Name            = "Files"
+    files.Size            = UDim2.new(1, -8, 0, 70)
+    files.Position        = UDim2.new(0, 4, 0, 108)
+    files.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+    files.BorderSizePixel = 0
+    files.Text            = "belum ada file"
+    files.TextColor3      = Color3.fromRGB(160, 200, 255)
+    files.TextSize        = 10
+    files.Font            = Enum.Font.Gotham
+    files.TextXAlignment  = Enum.TextXAlignment.Left
+    files.TextYAlignment  = Enum.TextYAlignment.Top
+    files.TextWrapped     = true
+    files.Parent          = frame
+
+    local reBtn = Instance.new("TextButton")
+    reBtn.Size            = UDim2.new(0, 120, 0, 30)
+    reBtn.Position        = UDim2.new(0, 4, 0, 182)
+    reBtn.BackgroundColor3 = Color3.fromRGB(40, 80, 140)
+    reBtn.BorderSizePixel = 0
+    reBtn.Text            = "Re-Dump"
+    reBtn.TextColor3      = Color3.fromRGB(220, 220, 255)
+    reBtn.TextSize        = 12
+    reBtn.Font            = Enum.Font.GothamBold
+    reBtn.Parent          = frame
+    reBtn.MouseButton1Click:Connect(function()
+        DumpState.phase = "tree";    pcall(dumpTree)
+        DumpState.phase = "remotes"; pcall(dumpRemotes)
+        DumpState.phase = "stats";   pcall(dumpStats)
+        DumpState.phase = "logic";   pcall(dumpLogic)
+        DumpState.phase = "done"
+        UI.status.Text = "Re-dump selesai!"
+    end)
+
+    local closeAll = Instance.new("TextButton")
+    closeAll.Size        = UDim2.new(0, 120, 0, 30)
+    closeAll.Position    = UDim2.new(0, 130, 0, 182)
+    closeAll.BackgroundColor3 = Color3.fromRGB(150, 60, 60)
+    closeAll.BorderSizePixel = 0
+    closeAll.Text        = "Tutup"
+    closeAll.TextColor3  = Color3.fromRGB(255,255,255)
+    closeAll.TextSize    = 12
+    closeAll.Font        = Enum.Font.GothamBold
+    closeAll.Parent      = frame
+    closeAll.MouseButton1Click:Connect(function() screen:Destroy() end)
+
+    UI.frame = frame
+    UI.status = status
+    UI.files = files
+
+    -- Auto-refresh tiap 2 detik
+    task.spawn(function()
+        while screen and screen.Parent do
+            task.wait(2)
+            pcall(function()
+                local elapsed = math.floor(os.clock() - DumpState.startedAt)
+                UI.status.Text = string.format(
+                    "phase: %s\nremote: %d | script: %d\nhook log: %d\nwaktu: %ds",
+                    DumpState.phase, DumpState.remotes, DumpState.scripts,
+                    DumpState.logsCount, elapsed)
+                local fLines = {}
+                for i, f in ipairs(DumpState.files) do
+                    fLines[#fLines+1] = ("%s (%d KB)"):format(f.name, f.size)
+                end
+                UI.files.Text = #fLines == 0 and "belum ada file" or table.concat(fLines, "\n")
+            end)
+        end
+    end)
+    print("[FULLDUMP] UI aktif")
+end
+
+task.spawn(buildUI)
+
+-- ============================================================
 -- INIT
 -- ============================================================
 print("==========================================")
@@ -419,13 +575,12 @@ pcall(function() writefile("dm_remote_logs.txt",
 
 -- Urutan: instans → remote → stats → logic → hook
 task.spawn(function()
-    notify("Mulai dump...", 3)
-    task.wait(1)
-    pcall(dumpTree)
-    pcall(dumpRemotes)
-    pcall(dumpStats)
-    pcall(dumpLogic)
-    pcall(initHook)
+    DumpState.phase = "tree";    pcall(dumpTree)
+    DumpState.phase = "remotes"; pcall(dumpRemotes)
+    DumpState.phase = "stats";   pcall(dumpStats)
+    DumpState.phase = "logic";   pcall(dumpLogic)
+    DumpState.phase = "hook";    pcall(initHook)
+    DumpState.phase = "done"
     print("==========================================")
     print("  DUMP SELESAI. File di folder Delta:")
     print("  dm_instances.txt  dm_remotes.txt")
