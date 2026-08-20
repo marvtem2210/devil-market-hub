@@ -27,6 +27,10 @@
   ke-tangkep spy (lebih akurat dari prompt). Gak ada data / data
   basi (>10 menit) → fallback ProximityPrompt kayak biasa.
   Urutan: load spy → gerak normal biar args ke-log → nyalain auto.
+
+  MODE KAITUN: kalau kaitun_engine.lua jalan, hub ngikutin phase
+  engine (GATHER->COOK->SERVE) — gak asal nyalain semua fitur.
+  Engine yang mutusin fitur mana yang aktif tiap saat.
   ============================================================
 ]]
 
@@ -48,6 +52,7 @@ local Config = {
     UseSpyRemote      = true,   -- pakai remote data dari remote_spy kalau ada
     SpyRemoteDelay    = 0.2,    -- jeda antar replay remote
     SpyDataFreshness  = 600,    -- detik; data spy dianggap basi setelah ini
+    UseKaitunEngine   = true,   -- ikutin phase dari kaitun_engine kalau ada
     EspPlayerColor    = Color3.fromRGB(255, 80, 80),
     EspItemColor      = Color3.fromRGB(80, 255, 120),
     DefaultWalkSpeed  = 16,
@@ -228,6 +233,46 @@ local function fireSpyCategory(category)
     end
     return fired
 end
+
+-- ============================================================
+-- KAITUN PHASE — baca keputusan dari kaitun_engine.lua
+-- ============================================================
+-- Hub jadi "tangan": nyalain/matiin fitur sesuai phase engine.
+local function kaitunPhase()
+    local k = _G and _G.DMKaitun
+    if not k or not k.running then return nil end
+    return k.phase
+end
+
+-- Fitur yang harus aktif per phase
+local function kaitunWantedFeatures()
+    local phase = kaitunPhase()
+    if not phase then return nil end
+    return {
+        autoFarm  = phase == "GATHER",
+        autoCook  = phase == "COOK",
+        autoServe = phase == "SERVE",
+        autoBuy   = phase == "GATHER",  -- beli/upgrade pas kumpulin bahan
+    }
+end
+
+-- Sync fitur hub dengan phase engine (dipanggil tiap detik)
+local function syncKaitun()
+    local wanted = kaitunWantedFeatures()
+    if not wanted then return end
+    for feature, enabled in pairs(wanted) do
+        if State[feature] ~= enabled then
+            setFeature(feature, enabled, "KAITUN")
+        end
+    end
+end
+
+task.spawn(function()
+    while true do
+        task.wait(2)
+        pcall(syncKaitun)
+    end
+end)
 
 -- ============================================================
 -- STATE & LOOP ENGINE
@@ -632,4 +677,5 @@ print("  F5  Speed Boost   F10 Matikan Semua")
 print("------------------------------------------")
 print("  Mode Hybrid: remote dari remote_spy (kalau ada)")
 print("  → replay remote + args asli, fallback ke prompt")
+print("  Mode Kaitun: ikutin phase engine kalau jalan")
 print("==========================================")
