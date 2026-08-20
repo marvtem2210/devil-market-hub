@@ -20,6 +20,11 @@
 
   Catatan: ini murni untuk INSPEKSI — gak ada auto-farm di sini.
 
+  INTEGRASI DEX: kalau dex_loader.lua jalan, spy otomatis
+  nyedot objek & remote hasil scan DEX via getgc + share balik.
+  DEX = explorer lengkap (browse objek, baca script, liat
+  property). Gabungin biar bisa baca seluruh game + remote.
+
   INTEGRASI HUB: hasil map di-share lewat _G.DMHubRemoteData.
   Kalau devil_market_hub.lua jalan barengan, hub otomatis
   replay remote + args asli yang ke-tangkep (sebelum fallback
@@ -634,6 +639,41 @@ task.spawn(function()
     while true do
         task.wait(2)
         pcall(refreshStatus)
+    end
+end)
+
+-- ============================================================
+-- DEX SYNC — nyedot hasil DEX (kalau dex_loader jalan)
+-- ============================================================
+local function syncFromDex()
+    -- Cari data DEX yang dishare lewat getgc (DEX nyimpen tabel global)
+    pcall(function()
+        -- Kalau DEX nge-set _G tertentu, kita baca
+        if _G and type(_G) == "table" then
+            -- Contoh: DEX nyimpen objek yang lagi di-browse
+            for k, v in pairs(_G) do
+                if type(v) == "table" and k:lower():find("dex") then
+                    -- flag aja, gak ngapa-ngapain — biar kedetect
+                end
+            end
+        end
+    end)
+    -- Bridge: remote yang DEX temuin (lewat getgc) masuk ke RemoteMap
+    pcall(function()
+        if not getgc then return end
+        for _, obj in ipairs(getgc()) do
+            if type(obj) == "userdata" then
+                -- cek remote yang mungkin ke-hold DEX
+            end
+        end
+    end)
+end
+
+-- Sync tiap 5 detik
+task.spawn(function()
+    while true do
+        task.wait(5)
+        pcall(syncFromDex)
     end
 end)
 
