@@ -13,9 +13,10 @@
     5. Dump ke konsol + save ke file (writefile)
 
   KONTROL:
-    F9   = SCAN ulang + dump objek/prompt ke konsol
-    F11  = Dump RemoteMap ke konsol + save ke file
-    F12  = Reset RemoteMap + scan ulang
+    F9   = Dump RemoteMap ke konsol
+    F11  = Dump + save ke file
+    F12  = Reset + scan ulang
+    UI   = panel pojok kanan atas (live feed + tombol)
 
   Catatan: ini murni untuk INSPEKSI — gak ada auto-farm di sini.
 
@@ -179,8 +180,10 @@ local function categorizeRemote(remote)
     if cat then
         table.insert(RemoteMap[cat], remote)
         log(("REMOTE [%s] "):format(string.upper(cat)) .. path)
+        pushFeed(("[%s] %s"):format(string.upper(cat), path))
     else
         log("REMOTE [?] " .. path)
+        pushFeed("[?] " .. path)
     end
 
     -- Sync ke shared data (dibaca hub)
@@ -276,6 +279,13 @@ local function initHook()
                 method = method,
                 args   = table.concat(argStrs, ", "),
             })
+
+            -- Push ke feed UI (live)
+            pcall(function()
+                local shortArgs = table.concat(argStrs, ", ")
+                if #shortArgs > 90 then shortArgs = shortArgs:sub(1, 90) .. "..." end
+                pushFeed(("\"%s\"(%s)"):format(self.Name, shortArgs))
+            end)
 
             -- Update shared data (raw args biar hub bisa replay)
             local path = self:GetFullName()
@@ -430,6 +440,204 @@ local function startAutoSave()
 end
 
 -- ============================================================
+-- UI — panel pojok kanan atas (live feed)
+-- ============================================================
+local SpyUI = {}
+
+local function uiLog(msg)
+    log(msg)
+end
+
+-- Feed item: { time, text }
+local feed = {}
+local FEED_MAX = 60
+
+local function pushFeed(text)
+    table.insert(feed, { time = os.date("%H:%M:%S"), text = text })
+    if #feed > FEED_MAX then table.remove(feed, 1) end
+    if SpyUI.feedLabel then
+        local lines = {}
+        local start = math.max(1, #feed - 19)
+        for i = start, #feed do
+            local e = feed[i]
+            lines[#lines+1] = ("[%s] %s"):format(e.time, e.text)
+        end
+        SpyUI.feedLabel.Text = table.concat(lines, "\n")
+    end
+end
+
+-- Bikin overlay UI (dipanggil sekali)
+local function buildSpyUI()
+    -- Cleanup kalau udah ada
+    local existing = LP:FindFirstChild("PlayerGui") and LP.PlayerGui:FindFirstChild("SpyUI")
+    if existing then existing:Destroy() end
+
+    local PlayerGui = LP:WaitForChild("PlayerGui", 10)
+    if not PlayerGui then return end
+
+    -- ScreenGui
+    local screen = Instance.new("ScreenGui")
+    screen.Name            = "SpyUI"
+    screen.ResetOnSpawn    = false
+    screen.DisplayOrder    = 998
+    screen.IgnoreGuiInset  = true
+    screen.Parent          = PlayerGui
+
+    -- Main frame
+    local frame = Instance.new("Frame")
+    frame.Name             = "Main"
+    frame.Size             = UDim2.new(0, 420, 0, 300)
+    frame.Position         = UDim2.new(1, -430, 0, 45)
+    frame.BackgroundColor3 = Color3.fromRGB(14, 14, 18)
+    frame.BorderSizePixel  = 0
+    frame.Active           = true
+    frame.Draggable        = true
+    frame.Parent           = screen
+
+    -- Title bar
+    local title = Instance.new("TextLabel")
+    title.Size             = UDim2.new(1, -28, 0, 24)
+    title.Position         = UDim2.new(0, 4, 0, 0)
+    title.BackgroundTransparency = 1
+    title.Text             = "Remote Spy"
+    title.TextColor3       = Color3.fromRGB(120, 200, 255)
+    title.TextSize         = 13
+    title.Font             = Enum.Font.GothamBold
+    title.TextXAlignment   = Enum.TextXAlignment.Left
+    title.Parent           = frame
+
+    -- Close (X)
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size          = UDim2.new(0, 24, 0, 24)
+    closeBtn.Position      = UDim2.new(1, -26, 0, 0)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+    closeBtn.BorderSizePixel  = 0
+    closeBtn.Text          = "X"
+    closeBtn.TextColor3    = Color3.fromRGB(255, 255, 255)
+    closeBtn.TextSize      = 11
+    closeBtn.Font          = Enum.Font.GothamBold
+    closeBtn.Parent        = frame
+    closeBtn.MouseButton1Click:Connect(function()
+        screen:Destroy()
+    end)
+
+    -- Status bar
+    local status = Instance.new("TextLabel")
+    status.Name            = "Status"
+    status.Size            = UDim2.new(1, -8, 0, 18)
+    status.Position        = UDim2.new(0, 4, 0, 26)
+    status.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+    status.BorderSizePixel = 0
+    status.Text            = "scan: ... | hook: ... | farm:0 cook:0 serve:0 buy:0"
+    status.TextColor3      = Color3.fromRGB(160, 200, 160)
+    status.TextSize        = 10
+    status.Font            = Enum.Font.Gotham
+    status.TextXAlignment  = Enum.TextXAlignment.Left
+    status.TextTruncate    = Enum.TextTruncate.AtEnd
+    status.Parent          = frame
+    SpyUI.statusLabel = status
+
+    -- Feed label (scrolling)
+    local feedLabel = Instance.new("TextLabel")
+    feedLabel.Name        = "Feed"
+    feedLabel.Size        = UDim2.new(1, -8, 0, 168)
+    feedLabel.Position    = UDim2.new(0, 4, 0, 46)
+    feedLabel.BackgroundColor3 = Color3.fromRGB(20, 20, 26)
+    feedLabel.BorderSizePixel = 0
+    feedLabel.Text        = "Menunggu remote..."
+    feedLabel.TextColor3  = Color3.fromRGB(200, 200, 200)
+    feedLabel.TextSize    = 10
+    feedLabel.Font        = Enum.Font.Code
+    feedLabel.TextXAlignment = Enum.TextXAlignment.Left
+    feedLabel.TextYAlignment = Enum.TextYAlignment.Top
+    feedLabel.TextWrapped = false
+    feedLabel.ClipsDescendants = true
+    feedLabel.Parent      = frame
+    SpyUI.feedLabel = feedLabel
+
+    -- Button bar
+    local y = 220
+    local BW = (420 - 12) / 4  -- 4 tombol per baris
+    local function makeBtn(label, x, fn, color)
+        local b = Instance.new("TextButton")
+        b.Size               = UDim2.new(0, BW - 4, 0, 22)
+        b.Position           = UDim2.new(0, x, 0, y)
+        b.BackgroundColor3   = color or Color3.fromRGB(40, 80, 140)
+        b.BorderSizePixel    = 0
+        b.Text               = label
+        b.TextColor3         = Color3.fromRGB(220, 220, 255)
+        b.TextSize           = 10
+        b.Font               = Enum.Font.GothamBold
+        b.Parent             = frame
+        b.MouseButton1Click:Connect(fn)
+        return b
+    end
+
+    local GREEN = Color3.fromRGB(40, 130, 70)
+    local GRAY  = Color3.fromRGB(50, 50, 60)
+    local BLUE  = Color3.fromRGB(40, 80, 140)
+    local RED   = Color3.fromRGB(150, 60, 60)
+
+    makeBtn("Scan Ulang", 2, function() pushFeed(">>> Scan ulang..."); resetRemoteMap() end, BLUE)
+    makeBtn("Dump", BW + 6, function() dumpRemoteMap(); pushFeed(">>> Dump ke konsol") end, BLUE)
+    makeBtn("Save", BW * 2 + 10, function() local ok = saveToFile(); pushFeed(ok and (">>> Saved: " .. Config.SaveFileName) or ">>> Save gagal (gak ada writefile)") end, GREEN)
+    makeBtn("Clear", BW * 3 + 14, function() feed = {}; SpyUI.feedLabel.Text = "Feed dikosongin" end, RED)
+
+    y = y + 26
+    local B2W = (420 - 12) / 3
+    local copyPath, copyArgs
+
+    -- Copy Path: salin path remote terakhir ke clipboard (executor)
+    copyPath = makeBtn("Copy Path", 2, function()
+        local last = feed[#feed]
+        if not last then return end
+        local path = last.text:match("%S+$")
+        if path then
+            local ok = pcall(function() setclipboard(path) end)
+            pushFeed(ok and (">>> Path disalin: " .. path) or ">>> setclipboard gak ada di executor ini")
+        end
+    end, GRAY)
+    makeBtn("Copy Args", B2W + 6, function()
+        local last = feed[#feed]
+        if not last then return end
+        local s, e = last.text:find("%(")
+        if s then
+            local args = last.text:sub(s + 1, -2)
+            local ok = pcall(function() setclipboard(args) end)
+            pushFeed(ok and (">>> Args disalin: " .. args) or ">>> setclipboard gak ada di executor ini")
+        end
+    end, GRAY)
+    makeBtn("Refresh Status", B2W * 2 + 10, function()
+        refreshStatus()
+        pushFeed(">>> Status di-refresh")
+    end, BLUE)
+
+    frame.Size = UDim2.new(0, 420, 0, y + 26)
+
+    SpyUI.frame = frame
+    uiLog("UI spy aktif")
+end
+
+local function refreshStatus()
+    if not SpyUI.statusLabel then return end
+    local hookTxt = hookActive and "AKTIF" or "statis"
+    SpyUI.statusLabel.Text = ("scan:%d hook:%s | farm:%d cook:%d serve:%d buy:%d | logs:%d"):format(
+        #RemoteMap.all,
+        hookTxt,
+        #RemoteMap.farm, #RemoteMap.cook, #RemoteMap.serve, #RemoteMap.buy,
+        #RemoteMap.logs
+    )
+end
+
+-- Status auto-refresh loop
+task.spawn(function()
+    while true do
+        task.wait(2)
+        pcall(refreshStatus)
+    end
+end)
+
+-- ============================================================
 -- KEYBINDS
 -- ============================================================
 UIS.InputBegan:Connect(function(input, gameProcessed)
@@ -463,6 +671,9 @@ end)
 
 -- 4. Auto-save
 task.spawn(startAutoSave)
+
+-- 5. Bangun UI spy (feed live + tombol)
+task.spawn(buildSpyUI)
 
 print("  F9  Dump Remote Map")
 print("  F11 Dump + Save ke file")
