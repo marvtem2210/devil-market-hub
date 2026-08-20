@@ -1,17 +1,28 @@
 --[[
   ============================================================
-  DEVIL'S MARKET (Pasar Setan) — AUTO HUB v4 FINAL
-  UI: 100% CUSTOM (buatan sendiri, tanpa library eksternal)
-  Tanpa download, tanpa key system, tanpa webhook, tanpa obfuscation.
+  DEVIL'S MARKET (Pasar Setan) — AUTO HUB v6
+  + REMOTE AUTO-DETECTOR (merged dari RemoteSpy)
 
-  FITUR:
-    1. Auto-Farm / Auto-Cook / Auto-Serve / Auto-Buy
-    2. Speed Boost (WalkSpeed & JumpPower slider)
-    3. Anti-AFK
-    4. Infinite Jump
-    5. Teleport (dropdown + input custom + scan terdekat)
-    6. ESP (highlight pemain & objek + colorpicker)
-    7. SCAN dump nama objek ke konsol
+  Cara kerja:
+    1. Saat load, script scan SEMUA RemoteEvent/RemoteFunction di game
+    2. Hook __namecall untuk intercept semua FireServer/InvokeServer live
+    3. Remote yang kedeteksi dikategorikan otomatis (farm/cook/serve/buy)
+    4. Auto-feature pakai remote langsung — lebih akurat dari proximity prompt
+    5. Fallback ke ProximityPrompt kalau remote belum kedeteksi
+
+  KONTROL:
+    F1  = Auto-Farm ON/OFF
+    F2  = Auto-Cook ON/OFF
+    F3  = Auto-Serve ON/OFF
+    F4  = Auto-Buy ON/OFF
+    F5  = Speed Boost ON/OFF
+    F6  = Anti-AFK ON/OFF
+    F7  = ESP ON/OFF
+    F8  = Teleport ke lokasi terdekat
+    F9  = SCAN — dump objek + remote ke konsol
+    F10 = Matikan SEMUA fitur
+    F11 = Dump RemoteMap (lihat remote yang udah kedeteksi)
+    F12 = Reset RemoteMap (scan ulang)
   ============================================================
 ]]
 
@@ -19,31 +30,61 @@
 -- CONFIG
 -- ============================================================
 local Config = {
+    -- Keyword buat fallback ProximityPrompt
     ToolNames     = { "Hoe", "Watering", "Seed", "Sickle", "Axe", "Shovel", "Panen", "Tanam" },
-    FarmKeywords  = { "farm", "plant", "plot", "tanam", "panen", "crop", "garden", "tani", "seed" },
-    CookKeywords  = { "cook", "oven", "pot", "stove", "furnace", "station", "kitchen", "masak", "panci", "kompor" },
-    ServeKeywords = { "serve", "customer", "ghost", "npc", "counter", "meja", "pelanggan", "layani", "order" },
-    BuyKeywords   = { "buy", "upgrade", "shop", "market", "purchase", "beli", "toko" },
+    FarmKeywords  = { "farm", "plant", "plot", "tanam", "panen", "crop", "garden", "tani", "seed", "harvest" },
+    CookKeywords  = { "cook", "oven", "pot", "stove", "furnace", "station", "kitchen", "masak", "panci", "kompor", "recipe" },
+    ServeKeywords = { "serve", "customer", "ghost", "npc", "counter", "meja", "pelanggan", "layani", "order", "deliver" },
+    BuyKeywords   = { "buy", "upgrade", "shop", "market", "purchase", "beli", "toko", "unlock", "store" },
     TeleportSpots = { "stall", "kios", "dapur", "kitchen", "farm", "lahan", "pulau", "island", "home", "rumah", "spawn", "market" },
-    ScanRadius    = 30,
-    ActionDelay   = 0.35,
-    LoopInterval  = 2.0,
-    EspPlayerColor = Color3.fromRGB(255, 80, 80),
-    EspItemColor   = Color3.fromRGB(80, 255, 120),
-    DefaultWalkSpeed = 16,
-    DefaultJumpPower = 50,
-    AntiAfkInterval  = 45,
+
+    -- Remote keyword kategori (untuk auto-kategorisasi)
+    RemoteFarmKw  = { "farm", "plant", "harvest", "seed", "tanam", "panen", "water", "grow", "crop" },
+    RemoteCookKw  = { "cook", "recipe", "craft", "make", "masak", "process", "brew", "bake" },
+    RemoteServeKw = { "serve", "deliver", "order", "complete", "customer", "layani", "antar", "give" },
+    RemoteBuyKw   = { "buy", "purchase", "upgrade", "unlock", "beli", "shop", "store", "acquire" },
+
+    ScanRadius        = 30,
+    ActionDelay       = 0.35,
+    LoopInterval      = 2.0,
+    EspPlayerColor    = Color3.fromRGB(255, 80, 80),
+    EspItemColor      = Color3.fromRGB(80, 255, 120),
+    DefaultWalkSpeed  = 16,
+    SpeedBoostValue   = 32,
+    AntiAfkInterval   = 45,
+    MaxRemoteLogs     = 300,  -- batas log remote biar nggak bocor memori
+    RemoteFireDelay   = 0.2,  -- jeda antar fire remote
+
+    -- Save ke file (executor workspace folder)
+    SaveFileName      = "DevilMarket_Remotes.txt",  -- ganti nama sesuka lo
+    AutoSaveInterval  = 0,   -- >0 = auto-save tiap N detik, 0 = manual (tekan F11)
 }
 
 -- ============================================================
--- SERVICES & HELPERS
+-- SERVICES
 -- ============================================================
-local Players = game:GetService("Players")
-local LP       = Players.LocalPlayer
-local UIS      = game:GetService("UserInputService")
-local VIM      = game:GetService("VirtualInputManager")
-local PlayerGui = LP:WaitForChild("PlayerGui")
+local Players    = game:GetService("Players")
+local LP         = Players.LocalPlayer
+local UIS        = game:GetService("UserInputService")
+local VIM        = game:GetService("VirtualInputManager")
+local RS         = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 
+-- ============================================================
+-- REMOTE MAP — hasil deteksi
+-- ============================================================
+local RemoteMap = {
+    farm  = {},  -- list RemoteEvent/Function untuk farming
+    cook  = {},  -- masak
+    serve = {},  -- layani pelanggan
+    buy   = {},  -- beli/upgrade
+    all   = {},  -- semua remote yang pernah ketangkep
+    logs  = {},  -- log call: {time, path, method, args}
+}
+
+-- ============================================================
+-- HELPERS UMUM
+-- ============================================================
 local function char() return LP.Character end
 local function hrp()
     local c = char(); return c and c:FindFirstChild("HumanoidRootPart")
@@ -52,9 +93,8 @@ local function hum()
     local c = char(); return c and c:FindFirstChildOfClass("Humanoid")
 end
 
-local firePrompt = fireproximityprompt
-
 local function lower(s) return string.lower(tostring(s or "")) end
+
 local function matchesKeywords(name, keywords)
     local n = lower(name)
     for _, kw in ipairs(keywords) do
@@ -62,6 +102,207 @@ local function matchesKeywords(name, keywords)
     end
     return false
 end
+
+local function log(msg)
+    print("[DMHub v6] " .. msg)
+end
+
+-- Notifikasi native Roblox (pojok kanan atas) — aman dari blokir GUI executor
+local function notify(title, text, duration)
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = title or "DMHub v6",
+            Text  = text or "",
+            Duration = duration or 5,
+        })
+    end)
+end
+
+-- Serialize argument buat logging (dari RemoteSpy)
+local FormatArg
+local function SerializeTable(tbl, depth, visited)
+    depth   = depth   or 0
+    visited = visited or {}
+    if depth >= 4 then return "{...}" end
+    if visited[tbl] then return "{CIRCULAR}" end
+    visited[tbl] = true
+    local parts = {}
+    local empty = true
+    for k, v in pairs(tbl) do
+        empty = false
+        local ks = type(k) == "string" and k or ("[" .. tostring(k) .. "]")
+        parts[#parts+1] = ks .. "=" .. FormatArg(v, depth+1, visited)
+    end
+    return empty and "{}" or ("{" .. table.concat(parts, ", ") .. "}")
+end
+
+FormatArg = function(arg, depth, visited)
+    depth   = depth   or 0
+    visited = visited or {}
+    if arg == nil then return "nil" end
+    local t = typeof(arg)
+    if t == "Instance"       then return "Inst(" .. (pcall(function() return arg:GetFullName() end) and arg:GetFullName() or "?") .. ")" end
+    if t == "table"          then return SerializeTable(arg, depth, visited) end
+    if t == "string"         then return '"' .. arg:sub(1, 80) .. '"' end
+    if t == "Vector3"        then return ("V3(%.1f,%.1f,%.1f)"):format(arg.X, arg.Y, arg.Z) end
+    if t == "CFrame"         then local p = arg.Position; return ("CF(%.1f,%.1f,%.1f)"):format(p.X, p.Y, p.Z) end
+    if t == "EnumItem"       then return "Enum." .. tostring(arg) end
+    return tostring(arg)
+end
+
+-- ============================================================
+-- REMOTE SCANNER — deteksi & kategorisasi
+-- ============================================================
+
+-- Kategorikan satu remote ke RemoteMap
+local function categorizeRemote(remote)
+    local path = remote:GetFullName()
+    local name = lower(remote.Name)
+
+    -- Cek duplikat di all
+    for _, r in ipairs(RemoteMap.all) do
+        if r == remote then return end  -- udah ada
+    end
+    table.insert(RemoteMap.all, remote)
+
+    -- Kategorikan
+    if matchesKeywords(name, Config.RemoteFarmKw) then
+        table.insert(RemoteMap.farm, remote)
+        log("REMOTE [FARM] " .. path)
+    elseif matchesKeywords(name, Config.RemoteCookKw) then
+        table.insert(RemoteMap.cook, remote)
+        log("REMOTE [COOK] " .. path)
+    elseif matchesKeywords(name, Config.RemoteServeKw) then
+        table.insert(RemoteMap.serve, remote)
+        log("REMOTE [SERVE] " .. path)
+    elseif matchesKeywords(name, Config.RemoteBuyKw) then
+        table.insert(RemoteMap.buy, remote)
+        log("REMOTE [BUY] " .. path)
+    else
+        log("REMOTE [?] " .. path)
+    end
+end
+
+-- Scan semua remote di game (full scan)
+local function scanAllRemotes()
+    log("Scanning semua remote di game...")
+    local count = 0
+    for _, obj in ipairs(game:GetDescendants()) do
+        if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+            pcall(categorizeRemote, obj)
+            count = count + 1
+        end
+    end
+    local msg = ("%d remote ditemukan | Farm:%d Cook:%d Serve:%d Buy:%d Unknown:%d"):format(
+        count,
+        #RemoteMap.farm, #RemoteMap.cook,
+        #RemoteMap.serve, #RemoteMap.buy,
+        #RemoteMap.all - #RemoteMap.farm - #RemoteMap.cook - #RemoteMap.serve - #RemoteMap.buy
+    )
+    log("Scan selesai: " .. msg)
+    -- Kasih tau player buat tekan F11
+    notify("Scan Selesai!", msg .. "\n\nTekan F11 untuk save ke file.", 8)
+    print("[DMHub v6] Tekan F11 untuk save remote map ke: " .. Config.SaveFileName)
+end
+
+-- Reset dan scan ulang
+local function resetRemoteMap()
+    RemoteMap.farm  = {}
+    RemoteMap.cook  = {}
+    RemoteMap.serve = {}
+    RemoteMap.buy   = {}
+    RemoteMap.all   = {}
+    RemoteMap.logs  = {}
+    scanAllRemotes()
+end
+
+-- ============================================================
+-- NAMECALL HOOK — intercept FireServer/InvokeServer live
+-- ============================================================
+local oldNamecall = nil
+local hookActive  = false
+
+local function initHook()
+    if hookActive then return end
+    -- hookmetamethod hanya ada di executor (Synapse, Wave, dll)
+    -- Kalau nggak ada, skip — fallback ke scan statis aja
+    if not hookmetamethod then
+        log("hookmetamethod tidak tersedia di executor ini — pakai scan statis")
+        return
+    end
+
+    oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+        local method = getnamecallmethod()
+        local args   = {...}
+
+        if (method == "FireServer" or method == "InvokeServer")
+        and (self:IsA("RemoteEvent") or self:IsA("RemoteFunction")) then
+            -- Tambahkan ke RemoteMap kalau belum ada
+            pcall(categorizeRemote, self)
+
+            -- Simpan log (FIFO)
+            if #RemoteMap.logs >= Config.MaxRemoteLogs then
+                table.remove(RemoteMap.logs, 1)
+            end
+            local argStrs = {}
+            for i, a in ipairs(args) do
+                argStrs[i] = FormatArg(a)
+            end
+            table.insert(RemoteMap.logs, {
+                time   = os.date("%H:%M:%S"),
+                path   = self:GetFullName(),
+                method = method,
+                args   = table.concat(argStrs, ", "),
+            })
+        end
+
+        -- Selalu panggil original — jangan pernah block
+        return oldNamecall(self, ...)
+    end)
+
+    hookActive = true
+    log("Namecall hook aktif — semua FireServer/InvokeServer akan dicatat")
+end
+
+-- ============================================================
+-- FIRE REMOTE HELPER
+-- ============================================================
+
+-- Tembak satu remote dengan args
+local function fireRemote(remote, ...)
+    if not remote or not remote.Parent then return false end
+    local args = {...}
+    local ok, err = pcall(function()
+        if remote:IsA("RemoteEvent") then
+            remote:FireServer(unpack(args))
+        elseif remote:IsA("RemoteFunction") then
+            remote:InvokeServer(unpack(args))
+        end
+    end)
+    if not ok then
+        log("fireRemote error: " .. tostring(err))
+    end
+    return ok
+end
+
+-- Fire semua remote dalam kategori
+local function fireCategory(category, ...)
+    local remotes = RemoteMap[category]
+    if not remotes or #remotes == 0 then return false end
+    local fired = false
+    for _, r in ipairs(remotes) do
+        if fireRemote(r, ...) then
+            fired = true
+            task.wait(Config.RemoteFireDelay)
+        end
+    end
+    return fired
+end
+
+-- ============================================================
+-- PROXIMITY PROMPT HELPERS (fallback)
+-- ============================================================
+local firePrompt = fireproximityprompt
 
 local function getPromptsInRadius(radius)
     local root = hrp()
@@ -120,7 +361,8 @@ local function findPartsByKeywords(keywords)
     pcall(function()
         for _, obj in ipairs(workspace:GetDescendants()) do
             pcall(function()
-                if obj:IsA("BasePart") and obj.Position and matchesKeywords(obj.Name, keywords) then
+                if obj:IsA("BasePart") and obj.Position
+                and matchesKeywords(obj.Name, keywords) then
                     table.insert(found, obj)
                 end
             end)
@@ -129,40 +371,36 @@ local function findPartsByKeywords(keywords)
     return found
 end
 
-local function teleportTo(part)
-    local root = hrp()
-    if not root or not part then return false end
-    local cf = part.CFrame
-    if not cf then return false end
-    root.CFrame = cf * CFrame.new(0, 4, 0)
-    return true
-end
-
 -- ============================================================
--- STATE
+-- STATE & LOOP ENGINE
 -- ============================================================
 local State = {
-    autoFarm = false, autoCook = false, autoServe = false, autoBuy = false,
-    speed = false, antiAfk = false, esp = false, infJump = false,
+    autoFarm = false, autoCook = false,
+    autoServe = false, autoBuy = false,
+    speed = false, antiAfk = false, esp = false,
 }
 local activeLoops = {}
 
--- ============================================================
--- AUTO LOOPS
--- ============================================================
-local function runAutoLoop(key, filterKeywords)
+-- Loop generik — coba remote dulu, fallback ke prompt
+local function runAutoLoop(key, remoteCategory, promptKeywords)
     if activeLoops[key] then return end
     activeLoops[key] = task.spawn(function()
         while State[key] do
             pcall(function()
-                equipTool()
-                local items = getPromptsInRadius(Config.ScanRadius)
-                for _, item in ipairs(items) do
-                    if not State[key] then break end
-                    local pname = (item.prompt.Name or "") .. " " .. (item.part.Name or "")
-                    if #filterKeywords == 0 or matchesKeywords(pname, filterKeywords) then
-                        interactWith(item.prompt)
-                        task.wait(Config.ActionDelay)
+                -- Coba via remote (akurat)
+                local firedViaRemote = fireCategory(remoteCategory)
+
+                -- Fallback: ProximityPrompt
+                if not firedViaRemote then
+                    equipTool()
+                    local items = getPromptsInRadius(Config.ScanRadius)
+                    for _, item in ipairs(items) do
+                        if not State[key] then break end
+                        local pname = (item.prompt.Name or "") .. " " .. (item.part.Name or "")
+                        if #promptKeywords == 0 or matchesKeywords(pname, promptKeywords) then
+                            interactWith(item.prompt)
+                            task.wait(Config.ActionDelay)
+                        end
                     end
                 end
             end)
@@ -173,37 +411,45 @@ local function runAutoLoop(key, filterKeywords)
 end
 
 local function startAutoLoops()
-    if State.autoFarm  then runAutoLoop("autoFarm",  Config.FarmKeywords)  end
-    if State.autoCook  then runAutoLoop("autoCook",  Config.CookKeywords)  end
-    if State.autoServe then runAutoLoop("autoServe", Config.ServeKeywords) end
-    if State.autoBuy   then runAutoLoop("autoBuy",   Config.BuyKeywords)   end
+    if State.autoFarm  then runAutoLoop("autoFarm",  "farm",  Config.FarmKeywords)  end
+    if State.autoCook  then runAutoLoop("autoCook",  "cook",  Config.CookKeywords)  end
+    if State.autoServe then runAutoLoop("autoServe", "serve", Config.ServeKeywords) end
+    if State.autoBuy   then runAutoLoop("autoBuy",   "buy",   Config.BuyKeywords)   end
+end
+
+local function setFeature(key, enabled, label)
+    State[key] = enabled
+    log(label .. " " .. (enabled and "ON" or "OFF"))
+    if enabled then startAutoLoops() end
 end
 
 -- ============================================================
--- MOVEMENT
+-- SPEED
 -- ============================================================
-local function applySpeed()
-    local h = hum()
-    if not h then return end
-    h.WalkSpeed = Config.DefaultWalkSpeed
-    h.JumpPower = Config.DefaultJumpPower
-end
-
 local function setSpeed(on)
+    State.speed = on
     if on then
+        log("Speed Boost ON (" .. Config.SpeedBoostValue .. ")")
         task.spawn(function()
             while State.speed do
-                pcall(applySpeed)
+                pcall(function()
+                    local h = hum(); if h then h.WalkSpeed = Config.SpeedBoostValue end
+                end)
                 task.wait(1.5)
             end
         end)
     else
-        local h = hum()
-        if h then h.WalkSpeed = 16; h.JumpPower = 50 end
+        log("Speed Boost OFF")
+        local h = hum(); if h then h.WalkSpeed = Config.DefaultWalkSpeed end
     end
 end
 
+-- ============================================================
+-- ANTI-AFK
+-- ============================================================
 local function setAntiAfk(on)
+    State.antiAfk = on
+    log("Anti-AFK " .. (on and "ON" or "OFF"))
     if on then
         task.spawn(function()
             while State.antiAfk do
@@ -220,24 +466,12 @@ local function setAntiAfk(on)
     end
 end
 
-local infJumpConn = nil
-local function setInfJump(on)
-    if infJumpConn then pcall(function() infJumpConn:Disconnect() end); infJumpConn = nil end
-    if on then
-        infJumpConn = UIS.JumpRequest:Connect(function()
-            if State.infJump then
-                local h = hum()
-                if h and h.Health > 0 then h:ChangeState(Enum.HumanoidStateType.Jumping) end
-            end
-        end)
-    end
-end
-
 -- ============================================================
 -- ESP
 -- ============================================================
 local espHighlights = {}
 local ESP_MAX_ITEMS = 40
+
 local function clearESP()
     for _, hl in ipairs(espHighlights) do pcall(function() hl:Destroy() end) end
     espHighlights = {}
@@ -249,9 +483,9 @@ local function refreshESP()
         if p ~= LP and p.Character then
             pcall(function()
                 local hl = Instance.new("Highlight")
-                hl.FillColor = Config.EspPlayerColor
-                hl.OutlineColor = Color3.fromRGB(255, 255, 255)
-                hl.FillTransparency = 0.65
+                hl.FillColor          = Config.EspPlayerColor
+                hl.OutlineColor       = Color3.fromRGB(255, 255, 255)
+                hl.FillTransparency   = 0.65
                 hl.OutlineTransparency = 0.2
                 hl.Parent = p.Character
                 table.insert(espHighlights, hl)
@@ -266,12 +500,11 @@ local function refreshESP()
             pcall(function()
                 if obj:IsA("BasePart") and obj.Position
                 and (obj:FindFirstChildOfClass("ProximityPrompt") or obj:FindFirstChildOfClass("ClickDetector")) then
-                    local dist = (obj.Position - root.Position).Magnitude
-                    if dist <= Config.ScanRadius * 3 then
+                    if (obj.Position - root.Position).Magnitude <= Config.ScanRadius * 3 then
                         local hl = Instance.new("Highlight")
-                        hl.FillColor = Config.EspItemColor
-                        hl.OutlineColor = Color3.fromRGB(255, 255, 255)
-                        hl.FillTransparency = 0.55
+                        hl.FillColor          = Config.EspItemColor
+                        hl.OutlineColor       = Color3.fromRGB(255, 255, 255)
+                        hl.FillTransparency   = 0.55
                         hl.Parent = obj
                         table.insert(espHighlights, hl)
                         count = count + 1
@@ -283,12 +516,12 @@ local function refreshESP()
 end
 
 local function setESP(on)
+    State.esp = on
+    log("ESP " .. (on and "ON" or "OFF"))
     if on then
         refreshESP()
         task.spawn(function()
-            while State.esp do
-                task.wait(5); pcall(refreshESP)
-            end
+            while State.esp do task.wait(5); pcall(refreshESP) end
         end)
     else
         clearESP()
@@ -296,11 +529,32 @@ local function setESP(on)
 end
 
 -- ============================================================
--- SCANNER
+-- TELEPORT (F8)
+-- ============================================================
+local function teleportNearest()
+    local root = hrp()
+    if not root then log("Karakter belum spawn"); return end
+    local parts = findPartsByKeywords(Config.TeleportSpots)
+    local best, bestDist = nil, math.huge
+    for _, p in ipairs(parts) do
+        local d = (p.Position - root.Position).Magnitude
+        if d < bestDist then best, bestDist = p, d end
+    end
+    if best then
+        root.CFrame = best.CFrame * CFrame.new(0, 4, 0)
+        log("Teleport ke " .. best.Name .. " (" .. math.floor(bestDist) .. " stud)")
+    else
+        log("Tidak ada spot ditemukan. Coba F9 (SCAN).")
+    end
+end
+
+-- ============================================================
+-- SCANNER (F9) — dump objek + remote terdekat
 -- ============================================================
 local function runScanner()
     local root = hrp()
-    local lines = { "===== SCAN RESULT =====" }
+    local lines = { "===== SCAN v6 =====" }
+    -- Prompts terdekat
     local promptCount = 0
     pcall(function()
         for _, obj in ipairs(workspace:GetDescendants()) do
@@ -310,709 +564,357 @@ local function runScanner()
                 if par and par:IsA("BasePart") and par.Position and root then
                     local dist = math.floor((par.Position - root.Position).Magnitude)
                     if dist <= Config.ScanRadius * 3 then
-                        table.insert(lines, ("PROMPT: %s | parent: %s | dist: %d"):format(obj.Name, par.Name, dist))
+                        lines[#lines+1] = ("PROMPT: %s | parent: %s | dist: %d"):format(obj.Name, par.Name, dist)
                     end
                 end
             end
         end
     end)
-    table.insert(lines, "Total prompts: " .. promptCount)
+    lines[#lines+1] = "Total prompts: " .. promptCount
+    -- Tools di backpack
     pcall(function()
         for _, tool in ipairs(LP.Backpack:GetChildren()) do
-            table.insert(lines, "TOOL: " .. tool.Name)
+            lines[#lines+1] = "TOOL: " .. tool.Name
         end
     end)
-    local seen, count = {}, 0
-    pcall(function()
-        for _, obj in ipairs(workspace:GetDescendants()) do
-            if obj:IsA("BasePart") and obj.Position and root
-            and (obj.Position - root.Position).Magnitude <= Config.ScanRadius then
-                if not seen[obj.Name] then
-                    seen[obj.Name] = true
-                    table.insert(lines, "PART: " .. obj.Name)
-                    count = count + 1
-                end
-                if count >= 20 then break end
-            end
-        end
-    end)
+    -- Remote map summary
+    lines[#lines+1] = ("REMOTES: %d total | %d farm | %d cook | %d serve | %d buy"):format(
+        #RemoteMap.all, #RemoteMap.farm, #RemoteMap.cook, #RemoteMap.serve, #RemoteMap.buy)
     print(table.concat(lines, "\n"))
-    notify("SCAN Selesai", promptCount .. " prompt ditemukan — lihat konsol (F9)", 7)
+    log("SCAN selesai. Lihat konsol.")
 end
 
 -- ============================================================
--- CUSTOM UI (murni Instance.new, tanpa library)
+-- DUMP REMOTE MAP (F11)
 -- ============================================================
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "DevilMarketHub"
-ScreenGui.ResetOnSpawn = false
-ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-ScreenGui.Parent = PlayerGui
-
-local theme = {
-    bg       = Color3.fromRGB(18, 19, 26),
-    panel    = Color3.fromRGB(26, 28, 38),
-    panel2   = Color3.fromRGB(34, 36, 48),
-    accent   = Color3.fromRGB(255, 130, 60),
-    accent2  = Color3.fromRGB(60, 140, 255),
-    text     = Color3.fromRGB(235, 237, 245),
-    subtext  = Color3.fromRGB(160, 164, 180),
-    danger   = Color3.fromRGB(220, 70, 70),
-    toggleOn = Color3.fromRGB(255, 130, 60),
-    toggleOff= Color3.fromRGB(70, 72, 85),
-}
-
-local function new(className, props, children)
-    local obj = Instance.new(className)
-    for k, v in pairs(props or {}) do obj[k] = v end
-    for _, child in ipairs(children or {}) do
-        child.Parent = obj
-        -- Simpan referensi child bernama ke parent (seperti perilaku Roblox)
-        if child.Name and child.Name ~= "" then
-            obj[child.Name] = child
+local function dumpRemoteMap()
+    local lines = { "===== REMOTE MAP (v6) =====" }
+    local cats = { {name="FARM", t=RemoteMap.farm}, {name="COOK", t=RemoteMap.cook},
+                   {name="SERVE", t=RemoteMap.serve}, {name="BUY", t=RemoteMap.buy} }
+    for _, cat in ipairs(cats) do
+        lines[#lines+1] = "-- " .. cat.name .. " (" .. #cat.t .. ") --"
+        for _, r in ipairs(cat.t) do
+            pcall(function() lines[#lines+1] = "  " .. r:GetFullName() .. " [" .. r.ClassName .. "]" end)
         end
     end
-    return obj
+    -- Unknown
+    local known = {}
+    for _, cat in ipairs(cats) do
+        for _, r in ipairs(cat.t) do known[r] = true end
+    end
+    lines[#lines+1] = "-- UNKNOWN --"
+    for _, r in ipairs(RemoteMap.all) do
+        if not known[r] then
+            pcall(function() lines[#lines+1] = "  " .. r:GetFullName() .. " [" .. r.ClassName .. "]" end)
+        end
+    end
+    -- Log 10 terakhir
+    lines[#lines+1] = "-- LOG TERAKHIR (10) --"
+    local start = math.max(1, #RemoteMap.logs - 9)
+    for i = start, #RemoteMap.logs do
+        local e = RemoteMap.logs[i]
+        if e then
+            lines[#lines+1] = ("[%s] %s:%s(%s)"):format(e.time, e.path, e.method, e.args)
+        end
+    end
+    print(table.concat(lines, "\n"))
+    log("Remote map di-dump ke konsol.")
 end
 
--- Window
-local Window = new("Frame", {
-    Name = "Window",
-    Size = UDim2.fromOffset(360, 540),
-    Position = UDim2.new(0.5, -180, 0.5, -270),
-    BackgroundColor3 = theme.bg,
-    BorderSizePixel = 0,
-    Active = true,
-}, {
-    new("UICorner", { CornerRadius = UDim.new(0, 10) }),
-    new("UIStroke", { Color = theme.accent, Thickness = 1.5, Transparency = 0.4 }),
-})
-Window.Parent = ScreenGui  -- PENTING: window harus di-parent ke ScreenGui
+-- ============================================================
+-- SAVE TO FILE
+-- ============================================================
 
--- Title bar (drag)
-local CloseBtn = new("TextButton", {
-    Name = "CloseBtn",
-    Size = UDim2.fromOffset(22, 22),
-    Position = UDim2.new(1, -28, 0, 6),
-    BackgroundColor3 = Color3.fromRGB(60, 22, 22),
-    Text = "X",
-    TextColor3 = theme.danger,
-    TextSize = 13,
-    Font = Enum.Font.GothamBold,
-})
-local TitleBar = new("Frame", {
-    Name = "TitleBar",
-    Size = UDim2.new(1, 0, 0, 34),
-    BackgroundColor3 = theme.panel,
-    BorderSizePixel = 0,
-}, {
-    new("UICorner", { CornerRadius = UDim.new(0, 10) }),
-    new("Frame", {  -- bottom rounding fix
-        Size = UDim2.new(1, 0, 0, 10),
-        Position = UDim2.new(0, 0, 1, -10),
-        BackgroundColor3 = theme.panel,
-        BorderSizePixel = 0,
-    }),
-    new("TextLabel", {
-        Name = "Title",
-        Size = UDim2.new(1, -70, 1, 0),
-        BackgroundTransparency = 1,
-        Text = "DEVIL'S MARKET AUTO HUB",
-        TextColor3 = theme.text,
-        TextSize = 14,
-        Font = Enum.Font.GothamBold,
-        TextXAlignment = Enum.TextXAlignment.Center,
-    }),
-    CloseBtn,
-})
-TitleBar.Parent = Window
+local function buildSaveContent()
+    local lines = {}
+    lines[#lines+1] = "======================================================"
+    lines[#lines+1] = "  DEVIL'S MARKET AUTO HUB v6 — REMOTE MAP SAVE"
+    lines[#lines+1] = "  Disimpan: " .. os.date("%Y-%m-%d %H:%M:%S")
+    lines[#lines+1] = "======================================================"
+    lines[#lines+1] = ""
 
--- Drag logic
-local dragging, dragOffset = false, Vector2.new()
-TitleBar.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then
-        dragging = true
-        dragOffset = input.Position - Window.Position
+    local cats = {
+        { name = "FARM",  t = RemoteMap.farm  },
+        { name = "COOK",  t = RemoteMap.cook  },
+        { name = "SERVE", t = RemoteMap.serve },
+        { name = "BUY",   t = RemoteMap.buy   },
+    }
+
+    for _, cat in ipairs(cats) do
+        lines[#lines+1] = "-- " .. cat.name .. " (" .. #cat.t .. ") --"
+        for _, r in ipairs(cat.t) do
+            pcall(function()
+                lines[#lines+1] = "  [" .. r.ClassName .. "] " .. r:GetFullName()
+            end)
+        end
+        lines[#lines+1] = ""
     end
-end)
-UIS.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
-end)
-UIS.InputChanged:Connect(function(input)
-    if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-        Window.Position = UDim2.fromOffset(input.Position.X - dragOffset.X, input.Position.Y - dragOffset.Y)
+
+    -- Unknown
+    local known = {}
+    for _, cat in ipairs(cats) do
+        for _, r in ipairs(cat.t) do known[r] = true end
     end
-end)
-CloseBtn.MouseButton1Click:Connect(function() ScreenGui:Destroy() end)
+    lines[#lines+1] = "-- UNKNOWN (" .. (#RemoteMap.all - #RemoteMap.farm - #RemoteMap.cook - #RemoteMap.serve - #RemoteMap.buy) .. ") --"
+    for _, r in ipairs(RemoteMap.all) do
+        if not known[r] then
+            pcall(function()
+                lines[#lines+1] = "  [" .. r.ClassName .. "] " .. r:GetFullName()
+            end)
+        end
+    end
+    lines[#lines+1] = ""
 
--- Tab bar
-local TabBar = new("Frame", {
-    Name = "TabBar",
-    Size = UDim2.new(1, 0, 0, 34),
-    Position = UDim2.new(0, 0, 0, 34),
-    BackgroundColor3 = theme.panel2,
-    BorderSizePixel = 0,
-})
-TabBar.Parent = Window
+    -- Log call terakhir (50 entry)
+    lines[#lines+1] = "-- LOG CALL TERAKHIR (50) --"
+    local start = math.max(1, #RemoteMap.logs - 49)
+    for i = start, #RemoteMap.logs do
+        local e = RemoteMap.logs[i]
+        if e then
+            lines[#lines+1] = ("[%s] %s:%s(%s)"):format(e.time, e.path, e.method, e.args)
+        end
+    end
 
-local TabButtons = {}
-local Pages = {}
+    return table.concat(lines, "\n")
+end
 
-local tabDefs = {
-    { "FARM",  "Auto Farm/Cook/Serve/Buy" },
-    { "MOVE",  "Speed, Anti-AFK, Inf Jump" },
-    { "TELE",  "Teleport lokasi" },
-    { "VIS",   "ESP & SCAN" },
-}
+local function saveToFile()
+    -- writefile() adalah API executor (Synapse/Wave/dll) — tidak ada di Roblox biasa
+    if not writefile then
+        log("writefile tidak tersedia di executor ini — skip save")
+        return false
+    end
+    local ok, err = pcall(function()
+        writefile(Config.SaveFileName, buildSaveContent())
+    end)
+    if ok then
+        log("Disimpan ke: " .. Config.SaveFileName)
+    else
+        log("Gagal save: " .. tostring(err))
+    end
+    return ok
+end
 
-local function buildTabs()
-    local count = #tabDefs
-    for i, def in ipairs(tabDefs) do
-        local btn = new("TextButton", {
-            Name = "Tab_" .. def[1],
-            Size = UDim2.new(1 / count, -2, 1, -4),
-            Position = UDim2.new((i - 1) / count, 2, 0, 2),
-            BackgroundColor3 = i == 1 and theme.accent or theme.panel2,
-            Text = def[1],
-            TextColor3 = i == 1 and Color3.fromRGB(20, 20, 25) or theme.subtext,
-            TextSize = 12,
-            Font = Enum.Font.GothamBold,
-            AutoButtonColor = false,
-            BorderSizePixel = 0,
-        })
-        btn.Parent = TabBar
-        local corner = new("UICorner", { CornerRadius = UDim.new(0, 6) })
-        corner.Parent = btn
-        TabButtons[i] = btn
+-- Auto-save loop (jalan di background)
+local function startAutoSave()
+    if Config.AutoSaveInterval <= 0 then return end
+    task.spawn(function()
+        while true do
+            task.wait(Config.AutoSaveInterval)
+            pcall(saveToFile)
+        end
+    end)
+    log("Auto-save aktif setiap " .. Config.AutoSaveInterval .. "s → " .. Config.SaveFileName)
+end
 
-        -- Page container
-        local page = new("ScrollingFrame", {
-            Name = "Page_" .. def[1],
-            Size = UDim2.new(1, -12, 1, -12),
-            Position = UDim2.new(0, 6, 0, 6),
-            BackgroundTransparency = 1,
-            ScrollBarThickness = 4,
-            CanvasSize = UDim2.new(0, 0, 0, 0),
-            AutomaticCanvasSize = Enum.AutomaticSize.Y,
-            Visible = i == 1,
-        })
-        page.Parent = Window
-        Pages[i] = page
+-- ============================================================
+-- UI MOBILE — compact, pojok kanan atas
+-- ============================================================
+
+local UI = {}
+
+local function buildUI()
+    -- Cleanup kalau udah ada
+    local existing = LP:FindFirstChild("PlayerGui") and LP.PlayerGui:FindFirstChild("DMHubUI")
+    if existing then existing:Destroy() end
+
+    local StarterGui = game:GetService("StarterGui")
+    local PlayerGui  = LP:WaitForChild("PlayerGui", 10)
+    if not PlayerGui then return end
+
+    -- ScreenGui
+    local screen = Instance.new("ScreenGui")
+    screen.Name            = "DMHubUI"
+    screen.ResetOnSpawn    = false
+    screen.DisplayOrder    = 999
+    screen.IgnoreGuiInset  = true
+    screen.Parent          = PlayerGui
+
+    -- Main frame — kecil, pojok kanan atas
+    local frame = Instance.new("Frame")
+    frame.Name             = "Main"
+    frame.Size             = UDim2.new(0, 155, 0, 310)
+    frame.Position         = UDim2.new(1, -160, 0, 45)
+    frame.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+    frame.BorderSizePixel  = 0
+    frame.Active           = true
+    frame.Draggable        = true
+    frame.Parent           = screen
+
+    -- Title bar
+    local title = Instance.new("TextLabel")
+    title.Size             = UDim2.new(1, -28, 0, 24)
+    title.Position         = UDim2.new(0, 4, 0, 0)
+    title.BackgroundTransparency = 1
+    title.Text             = "DMHub v6"
+    title.TextColor3       = Color3.fromRGB(200, 160, 255)
+    title.TextSize         = 13
+    title.Font             = Enum.Font.GothamBold
+    title.TextXAlignment   = Enum.TextXAlignment.Left
+    title.Parent           = frame
+
+    -- Tombol close (X)
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size          = UDim2.new(0, 24, 0, 24)
+    closeBtn.Position      = UDim2.new(1, -26, 0, 0)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+    closeBtn.BorderSizePixel  = 0
+    closeBtn.Text          = "X"
+    closeBtn.TextColor3    = Color3.fromRGB(255, 255, 255)
+    closeBtn.TextSize      = 11
+    closeBtn.Font          = Enum.Font.GothamBold
+    closeBtn.Parent        = frame
+    closeBtn.MouseButton1Click:Connect(function()
+        screen:Destroy()
+    end)
+
+    -- Separator
+    local sep = Instance.new("Frame")
+    sep.Size               = UDim2.new(1, 0, 0, 1)
+    sep.Position           = UDim2.new(0, 0, 0, 24)
+    sep.BackgroundColor3   = Color3.fromRGB(60, 60, 70)
+    sep.BorderSizePixel    = 0
+    sep.Parent             = frame
+
+    -- Helper bikin tombol toggle
+    local CON = Color3.fromRGB(50, 180, 80)   -- ON  = hijau
+    local COFF = Color3.fromRGB(55, 55, 65)   -- OFF = abu
+
+    local function makeToggle(label, yPos, stateKey, onFn)
+        local btn = Instance.new("TextButton")
+        btn.Name           = stateKey
+        btn.Size           = UDim2.new(1, -8, 0, 26)
+        btn.Position       = UDim2.new(0, 4, 0, yPos)
+        btn.BackgroundColor3 = COFF
+        btn.BorderSizePixel  = 0
+        btn.Text           = label .. "  OFF"
+        btn.TextColor3     = Color3.fromRGB(200, 200, 200)
+        btn.TextSize       = 11
+        btn.Font           = Enum.Font.Gotham
+        btn.TextXAlignment = Enum.TextXAlignment.Left
+        btn.Parent         = frame
 
         btn.MouseButton1Click:Connect(function()
-            for j, b in ipairs(TabButtons) do
-                b.BackgroundColor3 = (j == i) and theme.accent or theme.panel2
-                b.TextColor3 = (j == i) and Color3.fromRGB(20, 20, 25) or theme.subtext
-            end
-            for j, p in ipairs(Pages) do p.Visible = (j == i) end
+            onFn()
+            -- Update tampilan
+            local on = State[stateKey]
+            btn.BackgroundColor3 = on and CON or COFF
+            btn.Text = label .. (on and "  ON" or "  OFF")
+            btn.TextColor3 = on and Color3.fromRGB(255,255,255) or Color3.fromRGB(200,200,200)
         end)
+
+        UI[stateKey .. "_btn"] = btn
+        return btn
     end
+
+    -- Helper bikin tombol aksi (non-toggle)
+    local function makeAction(label, yPos, fn)
+        local btn = Instance.new("TextButton")
+        btn.Size           = UDim2.new(1, -8, 0, 26)
+        btn.Position       = UDim2.new(0, 4, 0, yPos)
+        btn.BackgroundColor3 = Color3.fromRGB(40, 80, 140)
+        btn.BorderSizePixel  = 0
+        btn.Text           = label
+        btn.TextColor3     = Color3.fromRGB(200, 220, 255)
+        btn.TextSize       = 11
+        btn.Font           = Enum.Font.Gotham
+        btn.TextXAlignment = Enum.TextXAlignment.Left
+        btn.Parent         = frame
+
+        btn.MouseButton1Click:Connect(fn)
+        return btn
+    end
+
+    -- Tombol-tombol (yPos mulai dari 28, tiap row 28px)
+    local y = 28
+    makeToggle("Farm",     y, "autoFarm",  function() setFeature("autoFarm",  not State.autoFarm,  "Auto-Farm")  end) y = y + 28
+    makeToggle("Cook",     y, "autoCook",  function() setFeature("autoCook",  not State.autoCook,  "Auto-Cook")  end) y = y + 28
+    makeToggle("Serve",    y, "autoServe", function() setFeature("autoServe", not State.autoServe, "Auto-Serve") end) y = y + 28
+    makeToggle("Buy",      y, "autoBuy",   function() setFeature("autoBuy",   not State.autoBuy,   "Auto-Buy")   end) y = y + 28
+    makeToggle("Speed",    y, "speed",     function() setSpeed(not State.speed)    end) y = y + 28
+    makeToggle("Anti-AFK", y, "antiAfk",  function() setAntiAfk(not State.antiAfk) end) y = y + 28
+    makeToggle("ESP",      y, "esp",       function() setESP(not State.esp)        end) y = y + 28
+
+    -- Separator
+    local sep2 = Instance.new("Frame")
+    sep2.Size             = UDim2.new(1, 0, 0, 1)
+    sep2.Position         = UDim2.new(0, 0, 0, y)
+    sep2.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+    sep2.BorderSizePixel  = 0
+    sep2.Parent           = frame
+    y = y + 4
+
+    makeAction("Teleport",  y, teleportNearest) y = y + 28
+    makeAction("Scan",      y, runScanner)      y = y + 28
+    makeAction("Save (F11)",y, function() dumpRemoteMap(); saveToFile() end) y = y + 28
+    makeAction("Rescan",    y, resetRemoteMap)
+
+    -- Sesuaikan tinggi frame
+    frame.Size = UDim2.new(0, 155, 0, y + 28)
+
+    UI.frame = frame
+    log("UI mobile aktif")
 end
-
--- UI helpers
-local function addSection(page, title)
-    local sec = new("Frame", {
-        Size = UDim2.new(1, 0, 0, 0),
-        AutomaticSize = Enum.AutomaticSize.Y,
-        BackgroundColor3 = theme.panel,
-        BorderSizePixel = 0,
-    }, {
-        new("UICorner", { CornerRadius = UDim.new(0, 8) }),
-        new("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8) }),
-        new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }),
-        new("TextLabel", {
-            LayoutOrder = 0,
-            Size = UDim2.new(1, 0, 0, 22),
-            BackgroundTransparency = 1,
-            Text = title,
-            TextColor3 = theme.accent,
-            TextSize = 13,
-            Font = Enum.Font.GothamBold,
-            TextXAlignment = Enum.TextXAlignment.Left,
-        }),
-    })
-    sec.Parent = page
-    return sec
-end
-
-local function addParagraph_note(section, content)
-    local lbl = new("TextLabel", {
-        Size = UDim2.new(1, 0, 0, 0),
-        AutomaticSize = Enum.AutomaticSize.Y,
-        BackgroundTransparency = 1,
-        Text = content,
-        TextColor3 = theme.subtext,
-        TextSize = 11,
-        Font = Enum.Font.Gotham,
-        TextXAlignment = Enum.TextXAlignment.Left,
-        TextWrapped = true,
-    })
-    lbl.Parent = section
-    return lbl
-end
-
-local function addToggle(section, text, stateKey, onChange)
-    local row = new("Frame", {
-        Size = UDim2.new(1, 0, 0, 32),
-        BackgroundTransparency = 1,
-    }, {
-        new("TextLabel", {
-            Size = UDim2.new(1, -44, 1, 0),
-            BackgroundTransparency = 1,
-            Text = text,
-            TextColor3 = theme.text,
-            TextSize = 13,
-            Font = Enum.Font.Gotham,
-            TextXAlignment = Enum.TextXAlignment.Left,
-        }),
-    })
-    row.Parent = section
-
-    local btn = new("TextButton", {
-        Size = UDim2.fromOffset(36, 20),
-        Position = UDim2.new(1, -40, 0, 6),
-        BackgroundColor3 = theme.toggleOff,
-        Text = "",
-        AutoButtonColor = false,
-        BorderSizePixel = 0,
-    }, {
-        new("UICorner", { CornerRadius = UDim.new(1, 0) }),
-    })
-    btn.Parent = row
-
-    local knob = new("Frame", {
-        Size = UDim2.fromOffset(14, 14),
-        Position = UDim2.new(0, 3, 0, 3),
-        BackgroundColor3 = Color3.fromRGB(255, 255, 255),
-    }, {
-        new("UICorner", { CornerRadius = UDim.new(1, 0) }),
-    })
-    knob.Parent = btn
-
-    local function refresh()
-        local on = State[stateKey]
-        btn.BackgroundColor3 = on and theme.toggleOn or theme.toggleOff
-        knob.Position = on and UDim2.new(0, 19, 0, 3) or UDim2.new(0, 3, 0, 3)
-    end
-    btn.MouseButton1Click:Connect(function()
-        State[stateKey] = not State[stateKey]
-        refresh()
-        if onChange then pcall(onChange, State[stateKey]) end
-    end)
-    refresh()
-end
-
-local function addSlider(section, text, min, max, default, suffix, onChanged)
-    local value = default
-    local row = new("Frame", {
-        Size = UDim2.new(1, 0, 0, 44),
-        BackgroundTransparency = 1,
-    }, {
-        new("TextLabel", {
-            Name = "Lbl",
-            Size = UDim2.new(1, 0, 0, 18),
-            BackgroundTransparency = 1,
-            Text = text .. ": " .. default .. (suffix or ""),
-            TextColor3 = theme.text,
-            TextSize = 13,
-            Font = Enum.Font.Gotham,
-            TextXAlignment = Enum.TextXAlignment.Left,
-        }),
-        new("Frame", {
-            Name = "Bar",
-            Size = UDim2.new(1, -20, 0, 6),
-            Position = UDim2.new(0, 0, 0, 28),
-            BackgroundColor3 = Color3.fromRGB(50, 52, 64),
-            BorderSizePixel = 0,
-        }, {
-            new("UICorner", { CornerRadius = UDim.new(1, 0) }),
-            new("Frame", {
-                Name = "Fill",
-                Size = UDim2.new((default - min) / (max - min), 0, 1, 0),
-                BackgroundColor3 = theme.accent,
-                BorderSizePixel = 0,
-            }, { new("UICorner", { CornerRadius = UDim.new(1, 0) }) }),
-        }),
-    })
-    row.Parent = section
-
-    local bar = row.Bar
-    local fill = bar.Fill
-    local lbl = row.Lbl
-    local dragging = false
-
-    local function setFromX(x)
-        local rel = math.clamp((x - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
-        value = math.floor(min + rel * (max - min) + 0.5)
-        fill.Size = UDim2.new(rel, 0, 1, 0)
-        lbl.Text = text .. ": " .. value .. (suffix or "")
-        if onChanged then pcall(onChanged, value) end
-    end
-
-    bar.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging = true
-            setFromX(input.Position.X)
-        end
-    end)
-    UIS.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
-    end)
-    UIS.InputChanged:Connect(function(input)
-        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-            setFromX(input.Position.X)
-        end
-    end)
-    return row
-end
-
-local function addButton(section, text, onClick)
-    local btn = new("TextButton", {
-        Size = UDim2.new(1, 0, 0, 32),
-        BackgroundColor3 = theme.panel2,
-        Text = text,
-        TextColor3 = theme.text,
-        TextSize = 13,
-        Font = Enum.Font.GothamBold,
-        AutoButtonColor = true,
-        BorderSizePixel = 0,
-    }, { new("UICorner", { CornerRadius = UDim.new(0, 7) }) })
-    btn.Parent = section
-    btn.MouseButton1Click:Connect(function()
-        pcall(onClick)
-    end)
-    return btn
-end
-
-local function addInput(section, text, placeholder, onSubmit)
-    local row = new("Frame", {
-        Size = UDim2.new(1, 0, 0, 56),
-        BackgroundTransparency = 1,
-    }, {
-        new("TextLabel", {
-            Size = UDim2.new(1, 0, 0, 18),
-            BackgroundTransparency = 1,
-            Text = text,
-            TextColor3 = theme.text,
-            TextSize = 13,
-            Font = Enum.Font.Gotham,
-            TextXAlignment = Enum.TextXAlignment.Left,
-        }),
-        new("TextBox", {
-            Name = "Box",
-            Size = UDim2.new(1, 0, 0, 30),
-            Position = UDim2.new(0, 0, 0, 22),
-            BackgroundColor3 = Color3.fromRGB(14, 15, 20),
-            PlaceholderText = placeholder,
-            PlaceholderColor3 = theme.subtext,
-            Text = "",
-            TextColor3 = theme.text,
-            TextSize = 13,
-            Font = Enum.Font.Gotham,
-            ClearTextOnFocus = false,
-            BorderSizePixel = 0,
-        }, { new("UICorner", { CornerRadius = UDim.new(0, 6) }) }),
-    })
-    row.Parent = section
-    row.Box.FocusLost:Connect(function(enterPressed)
-        if enterPressed and onSubmit then pcall(onSubmit, row.Box.Text) end
-    end)
-    return row
-end
-
-local function addDropdown(section, text, options, defaultIdx, onChange)
-    local selected = options[defaultIdx or 1]
-    local row = new("Frame", {
-        Size = UDim2.new(1, 0, 0, 60),
-        BackgroundTransparency = 1,
-    }, {
-        new("TextLabel", {
-            Size = UDim2.new(1, 0, 0, 18),
-            BackgroundTransparency = 1,
-            Text = text,
-            TextColor3 = theme.text,
-            TextSize = 13,
-            Font = Enum.Font.Gotham,
-            TextXAlignment = Enum.TextXAlignment.Left,
-        }),
-        new("TextButton", {
-            Name = "Btn",
-            Size = UDim2.new(1, 0, 0, 32),
-            Position = UDim2.new(0, 0, 0, 22),
-            BackgroundColor3 = Color3.fromRGB(14, 15, 20),
-            Text = selected,
-            TextColor3 = theme.text,
-            TextSize = 13,
-            Font = Enum.Font.Gotham,
-            AutoButtonColor = true,
-            BorderSizePixel = 0,
-        }, {
-            new("UICorner", { CornerRadius = UDim.new(0, 6) }),
-        }),
-    })
-    row.Parent = section
-
-    local btn = row.Btn
-    local listFrame = new("Frame", {
-        Size = UDim2.new(1, 0, 0, 0),
-        Position = UDim2.new(0, 0, 0, 58),
-        BackgroundColor3 = Color3.fromRGB(14, 15, 20),
-        Visible = false,
-        BorderSizePixel = 0,
-        ZIndex = 5,
-    }, {
-        new("UICorner", { CornerRadius = UDim.new(0, 6) }),
-        new("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }),
-        new("UIPadding", { PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4) }),
-    })
-    listFrame.Parent = row
-
-    local function close()
-        listFrame.Visible = false
-        listFrame.Size = UDim2.new(1, 0, 0, 0)
-    end
-
-    btn.MouseButton1Click:Connect(function()
-        listFrame.Visible = not listFrame.Visible
-        if listFrame.Visible then
-            listFrame.Size = UDim2.new(1, 0, 0, #options * 30 + 8)
-        else
-            close()
-        end
-    end)
-
-    for _, opt in ipairs(options) do
-        local optBtn = new("TextButton", {
-            Size = UDim2.new(1, -8, 0, 26),
-            BackgroundColor3 = opt == selected and theme.accent or Color3.fromRGB(30, 32, 42),
-            Text = opt,
-            TextColor3 = opt == selected and Color3.fromRGB(20, 20, 25) or theme.text,
-            TextSize = 12,
-            Font = Enum.Font.Gotham,
-            AutoButtonColor = true,
-            BorderSizePixel = 0,
-        }, { new("UICorner", { CornerRadius = UDim.new(0, 5) }) })
-        optBtn.Parent = listFrame
-        optBtn.MouseButton1Click:Connect(function()
-            selected = opt
-            btn.Text = opt
-            close()
-            if onChange then pcall(onChange, opt) end
-        end)
-    end
-
-    return row, function(newOptions)
-        for _, child in ipairs(listFrame:GetChildren()) do
-            if child:IsA("TextButton") then child:Destroy() end
-        end
-        options = newOptions
-        selected = newOptions[1]
-        btn.Text = selected
-    end
-end
-
-local function addColorPicker(section, text, defaultColor, onChanged)
-    local row = new("Frame", {
-        Size = UDim2.new(1, 0, 0, 32),
-        BackgroundTransparency = 1,
-    }, {
-        new("TextLabel", {
-            Size = UDim2.new(1, -40, 1, 0),
-            BackgroundTransparency = 1,
-            Text = text,
-            TextColor3 = theme.text,
-            TextSize = 13,
-            Font = Enum.Font.Gotham,
-            TextXAlignment = Enum.TextXAlignment.Left,
-        }),
-    })
-    row.Parent = section
-    local swatch = new("TextButton", {
-        Size = UDim2.fromOffset(32, 20),
-        Position = UDim2.new(1, -36, 0, 6),
-        BackgroundColor3 = defaultColor,
-        Text = "",
-        AutoButtonColor = true,
-        BorderSizePixel = 0,
-    }, { new("UICorner", { CornerRadius = UDim.new(0, 5) }) })
-    swatch.Parent = row
-    -- siklus warna sederhana (merah -> hijau -> biru -> putih -> kembali)
-    local cycle = {
-        Color3.fromRGB(255, 80, 80),
-        Color3.fromRGB(80, 255, 120),
-        Color3.fromRGB(80, 140, 255),
-        Color3.fromRGB(255, 255, 255),
-        defaultColor,
-    }
-    local idx = 1
-    for i, c in ipairs(cycle) do
-        if c == defaultColor then idx = i break end
-    end
-    swatch.MouseButton1Click:Connect(function()
-        idx = idx % #cycle + 1
-        swatch.BackgroundColor3 = cycle[idx]
-        if onChanged then pcall(onChanged, cycle[idx]) end
-    end)
-end
-
-local function notify(title, content, duration)
-    local n = new("Frame", {
-        Size = UDim2.fromOffset(280, 0),
-        AutomaticSize = Enum.AutomaticSize.Y,
-        Position = UDim2.new(1, -290, 0, 10),
-        BackgroundColor3 = theme.panel,
-        BorderSizePixel = 0,
-    }, {
-        new("UICorner", { CornerRadius = UDim.new(0, 8) }),
-        new("UIStroke", { Color = theme.accent, Thickness = 1, Transparency = 0.5 }),
-        new("UIPadding", { PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12), PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8) }),
-        new("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }),
-        new("TextLabel", {
-            Size = UDim2.new(1, 0, 0, 18),
-            BackgroundTransparency = 1,
-            Text = title,
-            TextColor3 = theme.accent,
-            TextSize = 13,
-            Font = Enum.Font.GothamBold,
-            TextXAlignment = Enum.TextXAlignment.Left,
-        }),
-        new("TextLabel", {
-            Size = UDim2.new(1, 0, 0, 0),
-            AutomaticSize = Enum.AutomaticSize.Y,
-            BackgroundTransparency = 1,
-            Text = content or "",
-            TextColor3 = theme.text,
-            TextSize = 12,
-            Font = Enum.Font.Gotham,
-            TextXAlignment = Enum.TextXAlignment.Left,
-            TextWrapped = true,
-        }),
-    })
-    n.Parent = ScreenGui
-    -- animasi masuk
-    n.Position = UDim2.new(1, -290, 0, 10)
-    task.delay(duration or 5, function()
-        pcall(function() n:Destroy() end)
-    end)
-    -- susun notifikasi ke bawah
-    task.wait(0.1)
-    local y = 10
-    for _, child in ipairs(ScreenGui:GetChildren()) do
-        if child:IsA("Frame") and child ~= Window and child.Name ~= "Notification" then
-            child.Position = UDim2.new(1, -290, 0, y)
-            y = y + child.AbsoluteSize.Y + 10
-        end
-    end
-end
-
--- ============================================================
--- BUILD UI
--- ============================================================
-buildTabs()
-
--- ============ TAB 1: FARM ============
-local secFarm = addSection(Pages[1], "AUTO FARMING")
-addToggle(secFarm, "Auto-Farm (tanam & panen)", "autoFarm", function(v)
-    startAutoLoops()
-end)
-addToggle(secFarm, "Auto-Cook (masak)", "autoCook", function(v)
-    startAutoLoops()
-end)
-addToggle(secFarm, "Auto-Serve (layani pelanggan)", "autoServe", function(v)
-    startAutoLoops()
-end)
-addToggle(secFarm, "Auto-Buy / Upgrade", "autoBuy", function(v)
-    startAutoLoops()
-end)
-addParagraph_note(secFarm, "Keyword di Config (atas script) menentukan objek yang diinteraksi. Kalau tidak akurat, klik SCAN di tab VIS.")
-
--- ============ TAB 2: MOVE ============
-local secMove = addSection(Pages[2], "SPEED & JUMP")
-addToggle(secMove, "Speed Boost", "speed", setSpeed)
-addSlider(secMove, "WalkSpeed", 16, 120, Config.DefaultWalkSpeed, "", function(v)
-    Config.DefaultWalkSpeed = v
-    if State.speed then pcall(applySpeed) end
-end)
-addSlider(secMove, "JumpPower", 50, 300, Config.DefaultJumpPower, "", function(v)
-    Config.DefaultJumpPower = v
-    if State.speed then pcall(applySpeed) end
-end)
-local secUtil = addSection(Pages[2], "UTILITY")
-addToggle(secUtil, "Anti-AFK", "antiAfk", setAntiAfk)
-addToggle(secUtil, "Infinite Jump", "infJump", setInfJump)
-
--- ============ TAB 3: TELE ============
-local secTele = addSection(Pages[3], "TELEPORT")
-local teleDropdown, teleSetOptions = addDropdown(secTele, "Pilih Lokasi", { "Stall", "Dapur", "Farm", "Pulau", "Spawn", "Market" }, 1, function(opt)
-    if not opt then return end
-    local part = findPartsByKeywords({ opt })[1]
-    if part and teleportTo(part) then
-        notify("Teleport", "Ke " .. opt, 4)
-    else
-        notify("Teleport", "Lokasi '" .. opt .. "' tidak ditemukan", 4)
-    end
-end)
-addButton(secTele, "Scan & Teleport ke Lokasi Terdekat", function()
-    local root = hrp()
-    if not root then notify("Teleport", "Karakter belum spawn", 4) return end
-    local parts = findPartsByKeywords(Config.TeleportSpots)
-    local best, bestDist = nil, math.huge
-    for _, p in ipairs(parts) do
-        local d = (p.Position - root.Position).Magnitude
-        if d < bestDist then best, bestDist = p, d end
-    end
-    if best then
-        teleportTo(best)
-        notify("Teleport", "Ke " .. best.Name .. " (" .. math.floor(bestDist) .. " stud)", 5)
-    else
-        notify("Teleport", "Tidak ada spot ditemukan di sekitar", 5)
-    end
-end)
-addInput(secTele, "Teleport ke Nama Part", "cth: Stall, Dapur, Farm", function(v)
-    if v and v ~= "" then
-        local part = findPartsByKeywords({ v })[1]
-        if part and teleportTo(part) then
-            notify("Teleport", "Ke " .. v, 4)
-        else
-            notify("Teleport", "Part '" .. v .. "' tidak ditemukan", 4)
-        end
-    end
-end)
-
--- ============ TAB 4: VIS ============
-local secEsp = addSection(Pages[4], "ESP")
-addToggle(secEsp, "ESP (highlight pemain & objek)", "esp", setESP)
-addColorPicker(secEsp, "Warna ESP Pemain", Config.EspPlayerColor, function(c)
-    Config.EspPlayerColor = c
-    if State.esp then pcall(refreshESP) end
-end)
-addColorPicker(secEsp, "Warna ESP Objek", Config.EspItemColor, function(c)
-    Config.EspItemColor = c
-    if State.esp then pcall(refreshESP) end
-end)
-local secTool = addSection(Pages[4], "TOOLS")
-addButton(secTool, "SCAN — Dump Nama Objek", runScanner)
-addButton(secTool, "Respawn Karakter", function()
-    local h = hum()
-    if h then pcall(function() h.Health = 0 end) end
-end)
-
--- ============================================================
--- FINALIZE
--- ============================================================
-
-notify("Devil's Market Auto Hub", "Dimuat! Klik SCAN di tab VIS kalau auto-fiturnya tidak akurat.", 7)
-
-print("[DevilMarketHub v4] Loaded — Custom UI (tanpa library eksternal)")
-
--- cleanup saat ScreenGui dihapus
-ScreenGui.Destroying:Connect(function()
-    -- matikan semua state (loop berhenti karena cek State[key])
-    State.autoFarm = false; State.autoCook = false
-    State.autoServe = false; State.autoBuy = false
-    State.speed = false; State.antiAfk = false; State.esp = false
-    if infJumpConn then pcall(function() infJumpConn:Disconnect() end) end
+local function shutdownAll()
+    State.autoFarm = false; State.autoCook  = false
+    State.autoServe = false; State.autoBuy  = false
+    State.speed = false;     State.antiAfk  = false; State.esp = false
     clearESP()
-    local h = hum()
-    if h then h.WalkSpeed = 16; h.JumpPower = 50 end
+    local h = hum(); if h then h.WalkSpeed = Config.DefaultWalkSpeed end
+    log("SEMUA fitur dimatikan. Speed direset.")
+end
+
+-- ============================================================
+-- KEYBINDS
+-- ============================================================
+UIS.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    local k = input.KeyCode
+    if     k == Enum.KeyCode.F1  then setFeature("autoFarm",  not State.autoFarm,  "Auto-Farm")
+    elseif k == Enum.KeyCode.F2  then setFeature("autoCook",  not State.autoCook,  "Auto-Cook")
+    elseif k == Enum.KeyCode.F3  then setFeature("autoServe", not State.autoServe, "Auto-Serve")
+    elseif k == Enum.KeyCode.F4  then setFeature("autoBuy",   not State.autoBuy,   "Auto-Buy")
+    elseif k == Enum.KeyCode.F5  then setSpeed(not State.speed)
+    elseif k == Enum.KeyCode.F6  then setAntiAfk(not State.antiAfk)
+    elseif k == Enum.KeyCode.F7  then setESP(not State.esp)
+    elseif k == Enum.KeyCode.F8  then teleportNearest()
+    elseif k == Enum.KeyCode.F9  then runScanner()
+    elseif k == Enum.KeyCode.F10 then shutdownAll()
+    elseif k == Enum.KeyCode.F11 then dumpRemoteMap(); saveToFile()
+    elseif k == Enum.KeyCode.F12 then resetRemoteMap()
+    end
 end)
+
+-- ============================================================
+-- INIT
+-- ============================================================
+print("==========================================")
+print("  DEVIL'S MARKET AUTO HUB v6 — LOADING")
+print("==========================================")
+
+-- 1. Scan remote statis dulu
+task.spawn(scanAllRemotes)
+
+-- 2. Aktifkan hook namecall (kalau executor support)
+task.spawn(initHook)
+
+-- 3. Listen kalau ada remote baru masuk (DescendantAdded)
+game.DescendantAdded:Connect(function(obj)
+    if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+        pcall(categorizeRemote, obj)
+    end
+end)
+
+-- 4. Auto-save
+task.spawn(startAutoSave)
+
+-- 5. Bangun UI mobile (di-skip kalau PlayerGui belum ready)
+task.spawn(buildUI)
+
+print("  F1  Auto-Farm     F6  Anti-AFK")
+print("  F2  Auto-Cook     F7  ESP")
+print("  F3  Auto-Serve    F8  Teleport")
+print("  F4  Auto-Buy      F9  SCAN")
+print("  F5  Speed Boost   F10 Matikan Semua")
+print("  F11 Dump Remote   F12 Rescan Remote")
+print("==========================================")
