@@ -53,6 +53,27 @@ local Config = {
     SpyRemoteDelay    = 0.2,    -- jeda antar replay remote
     SpyDataFreshness  = 600,    -- detik; data spy dianggap basi setelah ini
     UseKaitunEngine   = true,   -- ikutin phase dari kaitun_engine kalau ada
+
+    -- SISTEM LID (kebal rename acak per-server):
+    -- Game Devil's Market rename SEMUA remote jadi "r<guid>" tiap server,
+    -- tapi attribute "LID" nyimpen nama logis asli. Resolve via LID
+    -- biar hub tetep jalan walau path/nama remote beda-beda tiap server.
+    UseLID            = true,
+    KnownLIDs = {
+        -- kategori -> daftar LID remote yang kita tau (dari dump logic 2026-08-21)
+        buy   = { "ShopBuy", "ShopPoll", "ShopState", "GaibUse" },
+        util  = { "GetServerList", "TeleportToServer", "LevelPoll", "PociTeleport",
+                  "Notify", "LevelChanged", "ShopOpen", "MarketUpgradeConfirm",
+                  "DevMessageSend", "DevMessageShow", "EventUgcState", "EventUgcRequest" },
+    },
+    -- Remote yang AMAN di-fire tanpa arg (poll/state). Yang butuh arg
+    -- (ShopBuy=ItemId, GaibUse=itemId) gak dimasukin biar gak error.
+    SafeNoArgLIDs = {
+        ShopPoll     = true,   -- RF InvokeServer() -> state shop
+        GetServerList = true,  -- RF InvokeServer(query?) -> query optional
+        LevelPoll    = true,   -- RF InvokeServer() -> {level, exp, ready}
+        ShopState    = true,   -- RE FireServer()
+    },
     EspPlayerColor    = Color3.fromRGB(255, 80, 80),
     EspItemColor      = Color3.fromRGB(80, 255, 120),
     DefaultWalkSpeed  = 16,
@@ -194,6 +215,64 @@ local function resolveRemoteByPath(path)
     return nil
 end
 
+-- ============================================================
+-- LID RESOLVER — kebal rename acak "r<guid>"
+-- ============================================================
+-- Game nyimpen nama logis di attribute "LID". Cari remote
+-- berdasarkan LID, bukan path/nama (yang diacak tiap server).
+local lidCache = {}  -- LID -> Remote
+
+local function resolveByLID(lid)
+    if lidCache[lid] and lidCache[lid].Parent then return lidCache[lid] end
+    lidCache[lid] = nil
+    for _, obj in ipairs(game:GetDescendants()) do
+        if (obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction"))
+        and obj:GetAttribute("LID") == lid then
+            lidCache[lid] = obj
+            return obj
+        end
+    end
+    return nil
+end
+
+-- Cari remote: LID dulu (kalau aktif), fallback path
+local function resolveRemote(lidOrPath)
+    if Config.UseLID then
+        local r = resolveByLID(lidOrPath)
+        if r then return r end
+    end
+    return resolveRemoteByPath(lidOrPath)
+end
+
+-- Fire remote no-arg yang aman (poll/state) — dipakai fallback
+-- kalau spy gak punya data & prompt gak ketemu.
+local function fireSafeNoArgLIDs(category)
+    if not Config.UseLID then return false end
+    local fired = false
+    local lids = Config.KnownLIDs[category]
+    if not lids then return false end
+    for _, lid in ipairs(lids) do
+        if Config.SafeNoArgLIDs[lid] then
+            local remote = resolveByLID(lid)
+            if remote then
+                local ok = pcall(function()
+                    if remote:IsA("RemoteFunction") then
+                        remote:InvokeServer()
+                    else
+                        remote:FireServer()
+                    end
+                end)
+                if ok then
+                    fired = true
+                    log(("LID fire: %s (%s)"):format(lid, remote.Name))
+                    task.wait(Config.SpyRemoteDelay)
+                end
+            end
+        end
+    end
+    return fired
+end
+
 -- Tembak satu remote dengan args
 local function fireRemote(remote, ...)
     if not remote or not remote.Parent then return false end
@@ -310,6 +389,15 @@ local function runAutoLoop(key, remoteCategory, promptKeywords)
                             interactWith(item.prompt)
                             task.wait(Config.ActionDelay)
                         end
+                    end
+                end
+
+                -- 3) Fallback LID: fire remote no-arg yang aman
+                -- (kalau prompt gak nemu & spy gak punya data)
+                -- Kategori "buy" punya ShopPoll/ShopState yang aman di-poll.
+                if not firedViaRemote and category == "buy" then
+                    if fireSafeNoArgLIDs("buy") then
+                        firedViaRemote = true
                     end
                 end
             end)
@@ -482,6 +570,21 @@ local function runScanner()
         end
     end)
     lines[#lines+1] = "Total prompts: " .. promptCount
+    -- Laporan LID: remote mana yang ke-detect + nama aslinya
+    if Config.UseLID then
+        local lidFound, lidTotal = 0, 0
+        for _, lids in pairs(Config.KnownLIDs) do
+            for _, lid in ipairs(lids) do
+                lidTotal = lidTotal + 1
+                local r = resolveByLID(lid)
+                if r then
+                    lidFound = lidFound + 1
+                    lines[#lines+1] = ("LID: %s -> %s [%s]"):format(lid, r.Name, r.ClassName)
+                end
+            end
+        end
+        lines[#lines+1] = ("LID terdeteksi: %d/%d"):format(lidFound, lidTotal)
+    end
     pcall(function()
         for _, tool in ipairs(LP.Backpack:GetChildren()) do
             lines[#lines+1] = "TOOL: " .. tool.Name
