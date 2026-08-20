@@ -1,13 +1,22 @@
 --[[
   ============================================================
-  DEVIL'S MARKET (Pasar Setan) — AUTO HUB v3
-  UI: Rayfield (by Sirius) — render ke PlayerGui, executor-friendly
-  Versi bersih: tanpa key system, tanpa webhook, tanpa obfuscation
+  DEVIL'S MARKET (Pasar Setan) — AUTO HUB v4 FINAL
+  UI: 100% CUSTOM (buatan sendiri, tanpa library eksternal)
+  Tanpa download, tanpa key system, tanpa webhook, tanpa obfuscation.
+
+  FITUR:
+    1. Auto-Farm / Auto-Cook / Auto-Serve / Auto-Buy
+    2. Speed Boost (WalkSpeed & JumpPower slider)
+    3. Anti-AFK
+    4. Infinite Jump
+    5. Teleport (dropdown + input custom + scan terdekat)
+    6. ESP (highlight pemain & objek + colorpicker)
+    7. SCAN dump nama objek ke konsol
   ============================================================
 ]]
 
 -- ============================================================
--- CONFIG — sesuaikan keyword sesuai hasil SCAN
+-- CONFIG
 -- ============================================================
 local Config = {
     ToolNames     = { "Hoe", "Watering", "Seed", "Sickle", "Axe", "Shovel", "Panen", "Tanam" },
@@ -33,6 +42,7 @@ local Players = game:GetService("Players")
 local LP       = Players.LocalPlayer
 local UIS      = game:GetService("UserInputService")
 local VIM      = game:GetService("VirtualInputManager")
+local PlayerGui = LP:WaitForChild("PlayerGui")
 
 local function char() return LP.Character end
 local function hrp()
@@ -43,10 +53,8 @@ local function hum()
 end
 
 local firePrompt = fireproximityprompt
-local fireClick  = fireclickdetector
 
 local function lower(s) return string.lower(tostring(s or "")) end
-
 local function matchesKeywords(name, keywords)
     local n = lower(name)
     for _, kw in ipairs(keywords) do
@@ -59,7 +67,7 @@ local function getPromptsInRadius(radius)
     local root = hrp()
     if not root then return {} end
     local found = {}
-    local ok, _ = pcall(function()
+    pcall(function()
         for _, obj in ipairs(workspace:GetDescendants()) do
             if obj:IsA("ProximityPrompt") then
                 local par = obj.Parent
@@ -72,22 +80,6 @@ local function getPromptsInRadius(radius)
             end
         end
     end)
-    if not ok then
-        found = {}
-        for _, obj in ipairs(workspace:GetDescendants()) do
-            pcall(function()
-                if obj:IsA("ProximityPrompt") then
-                    local par = obj.Parent
-                    if par and par:IsA("BasePart") and par.Position then
-                        local dist = (par.Position - root.Position).Magnitude
-                        if dist <= (radius or Config.ScanRadius) then
-                            table.insert(found, { prompt = obj, part = par, dist = dist })
-                        end
-                    end
-                end
-            end)
-        end
-    end
     table.sort(found, function(a, b) return a.dist < b.dist end)
     return found
 end
@@ -153,7 +145,6 @@ local State = {
     autoFarm = false, autoCook = false, autoServe = false, autoBuy = false,
     speed = false, antiAfk = false, esp = false, infJump = false,
 }
-local isUnloaded  = false
 local activeLoops = {}
 
 -- ============================================================
@@ -161,13 +152,13 @@ local activeLoops = {}
 -- ============================================================
 local function runAutoLoop(key, filterKeywords)
     if activeLoops[key] then return end
-    local thread = task.spawn(function()
-        while State[key] and not isUnloaded do
+    activeLoops[key] = task.spawn(function()
+        while State[key] do
             pcall(function()
                 equipTool()
                 local items = getPromptsInRadius(Config.ScanRadius)
                 for _, item in ipairs(items) do
-                    if not State[key] or isUnloaded then break end
+                    if not State[key] then break end
                     local pname = (item.prompt.Name or "") .. " " .. (item.part.Name or "")
                     if #filterKeywords == 0 or matchesKeywords(pname, filterKeywords) then
                         interactWith(item.prompt)
@@ -179,7 +170,6 @@ local function runAutoLoop(key, filterKeywords)
         end
         activeLoops[key] = nil
     end)
-    activeLoops[key] = thread
 end
 
 local function startAutoLoops()
@@ -202,7 +192,7 @@ end
 local function setSpeed(on)
     if on then
         task.spawn(function()
-            while State.speed and not isUnloaded do
+            while State.speed do
                 pcall(applySpeed)
                 task.wait(1.5)
             end
@@ -216,7 +206,7 @@ end
 local function setAntiAfk(on)
     if on then
         task.spawn(function()
-            while State.antiAfk and not isUnloaded do
+            while State.antiAfk do
                 pcall(function()
                     VIM:SendMouseMoveEvent(1, 1, game)
                     task.wait(0.05)
@@ -235,7 +225,7 @@ local function setInfJump(on)
     if infJumpConn then pcall(function() infJumpConn:Disconnect() end); infJumpConn = nil end
     if on then
         infJumpConn = UIS.JumpRequest:Connect(function()
-            if State.infJump and not isUnloaded then
+            if State.infJump then
                 local h = hum()
                 if h and h.Health > 0 then h:ChangeState(Enum.HumanoidStateType.Jumping) end
             end
@@ -248,7 +238,6 @@ end
 -- ============================================================
 local espHighlights = {}
 local ESP_MAX_ITEMS = 40
-
 local function clearESP()
     for _, hl in ipairs(espHighlights) do pcall(function() hl:Destroy() end) end
     espHighlights = {}
@@ -297,7 +286,7 @@ local function setESP(on)
     if on then
         refreshESP()
         task.spawn(function()
-            while State.esp and not isUnloaded do
+            while State.esp do
                 task.wait(5); pcall(refreshESP)
             end
         end)
@@ -309,7 +298,7 @@ end
 -- ============================================================
 -- SCANNER
 -- ============================================================
-local function runScanner(Rayfield)
+local function runScanner()
     local root = hrp()
     local lines = { "===== SCAN RESULT =====" }
     local promptCount = 0
@@ -348,294 +337,682 @@ local function runScanner(Rayfield)
         end
     end)
     print(table.concat(lines, "\n"))
-    Rayfield:Notify({ Title = "SCAN Selesai", Content = promptCount .. " prompt ditemukan — lihat konsol (F9)", Duration = 7 })
+    notify("SCAN Selesai", promptCount .. " prompt ditemukan — lihat konsol (F9)", 7)
 end
 
 -- ============================================================
--- LOAD RAYFIELD (versi resmi Sirius)
+-- CUSTOM UI (murni Instance.new, tanpa library)
 -- ============================================================
-local Rayfield
-local ok, err = pcall(function()
-    Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
-end)
-if not ok then
-    warn("[DevilMarketHub] Gagal load Rayfield: " .. tostring(err))
-    return
-end
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "DevilMarketHub"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = PlayerGui
 
--- ============================================================
--- WINDOW
--- ============================================================
-local Window = Rayfield:CreateWindow({
-    Name = "Devil's Market Auto Hub",
-    LoadingTitle = "Devil's Market Auto Hub",
-    LoadingSubtitle = "Clean | No Key | No Webhook",
-    ConfigurationSaving = {
-        Enabled = true,
-        FolderName = "DevilMarketHub",
-        FileName = "DevilMarket"
-    },
-    Discord = { Enabled = false },
-    KeySystem = false
-})
-
--- ============================================================
--- TABS
--- ============================================================
-local Tabs = {
-    Farm    = Window:CreateTab("Farming",  4483345998),
-    Cook    = Window:CreateTab("Cooking",  4483345998),
-    Serve   = Window:CreateTab("Serving",  4483345998),
-    Shop    = Window:CreateTab("Shopping", 4483345998),
-    Move    = Window:CreateTab("Movement", 4483345998),
-    Tele    = Window:CreateTab("Teleport", 4483345998),
-    Visual  = Window:CreateTab("Visual",   4483345998),
+local theme = {
+    bg       = Color3.fromRGB(18, 19, 26),
+    panel    = Color3.fromRGB(26, 28, 38),
+    panel2   = Color3.fromRGB(34, 36, 48),
+    accent   = Color3.fromRGB(255, 130, 60),
+    accent2  = Color3.fromRGB(60, 140, 255),
+    text     = Color3.fromRGB(235, 237, 245),
+    subtext  = Color3.fromRGB(160, 164, 180),
+    danger   = Color3.fromRGB(220, 70, 70),
+    toggleOn = Color3.fromRGB(255, 130, 60),
+    toggleOff= Color3.fromRGB(70, 72, 85),
 }
 
--- ============================================================
--- FARMING TAB
--- ============================================================
-Tabs.Farm:CreateSection("Auto Farming")
-Tabs.Farm:CreateToggle({
-    Name = "Auto-Farm (tanam & panen)",
-    CurrentValue = false,
-    Flag = "AutoFarm",
-    Callback = function(v)
-        State.autoFarm = v
-        startAutoLoops()
+local function new(className, props, children)
+    local obj = Instance.new(className)
+    for k, v in pairs(props or {}) do obj[k] = v end
+    for _, child in ipairs(children or {}) do
+        child.Parent = obj
+        -- Simpan referensi child bernama ke parent (seperti perilaku Roblox)
+        if child.Name and child.Name ~= "" then
+            obj[child.Name] = child
+        end
     end
+    return obj
+end
+
+-- Window
+local Window = new("Frame", {
+    Name = "Window",
+    Size = UDim2.fromOffset(360, 540),
+    Position = UDim2.new(0.5, -180, 0.5, -270),
+    BackgroundColor3 = theme.bg,
+    BorderSizePixel = 0,
+    Active = true,
+}, {
+    new("UICorner", { CornerRadius = UDim.new(0, 10) }),
+    new("UIStroke", { Color = theme.accent, Thickness = 1.5, Transparency = 0.4 }),
 })
-Tabs.Farm:CreateParagraph({
-    Title = "Tips",
-    Content = "Kalau tidak jalan, klik SCAN di tab Visual → sesuaikan keyword di Config."
+Window.Parent = ScreenGui  -- PENTING: window harus di-parent ke ScreenGui
+
+-- Title bar (drag)
+local CloseBtn = new("TextButton", {
+    Name = "CloseBtn",
+    Size = UDim2.fromOffset(22, 22),
+    Position = UDim2.new(1, -28, 0, 6),
+    BackgroundColor3 = Color3.fromRGB(60, 22, 22),
+    Text = "X",
+    TextColor3 = theme.danger,
+    TextSize = 13,
+    Font = Enum.Font.GothamBold,
 })
+local TitleBar = new("Frame", {
+    Name = "TitleBar",
+    Size = UDim2.new(1, 0, 0, 34),
+    BackgroundColor3 = theme.panel,
+    BorderSizePixel = 0,
+}, {
+    new("UICorner", { CornerRadius = UDim.new(0, 10) }),
+    new("Frame", {  -- bottom rounding fix
+        Size = UDim2.new(1, 0, 0, 10),
+        Position = UDim2.new(0, 0, 1, -10),
+        BackgroundColor3 = theme.panel,
+        BorderSizePixel = 0,
+    }),
+    new("TextLabel", {
+        Name = "Title",
+        Size = UDim2.new(1, -70, 1, 0),
+        BackgroundTransparency = 1,
+        Text = "DEVIL'S MARKET AUTO HUB",
+        TextColor3 = theme.text,
+        TextSize = 14,
+        Font = Enum.Font.GothamBold,
+        TextXAlignment = Enum.TextXAlignment.Center,
+    }),
+    CloseBtn,
+})
+TitleBar.Parent = Window
+
+-- Drag logic
+local dragging, dragOffset = false, Vector2.new()
+TitleBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = true
+        dragOffset = input.Position - Window.Position
+    end
+end)
+UIS.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+end)
+UIS.InputChanged:Connect(function(input)
+    if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+        Window.Position = UDim2.fromOffset(input.Position.X - dragOffset.X, input.Position.Y - dragOffset.Y)
+    end
+end)
+CloseBtn.MouseButton1Click:Connect(function() ScreenGui:Destroy() end)
+
+-- Tab bar
+local TabBar = new("Frame", {
+    Name = "TabBar",
+    Size = UDim2.new(1, 0, 0, 34),
+    Position = UDim2.new(0, 0, 0, 34),
+    BackgroundColor3 = theme.panel2,
+    BorderSizePixel = 0,
+})
+TabBar.Parent = Window
+
+local TabButtons = {}
+local Pages = {}
+
+local tabDefs = {
+    { "FARM",  "Auto Farm/Cook/Serve/Buy" },
+    { "MOVE",  "Speed, Anti-AFK, Inf Jump" },
+    { "TELE",  "Teleport lokasi" },
+    { "VIS",   "ESP & SCAN" },
+}
+
+local function buildTabs()
+    local count = #tabDefs
+    for i, def in ipairs(tabDefs) do
+        local btn = new("TextButton", {
+            Name = "Tab_" .. def[1],
+            Size = UDim2.new(1 / count, -2, 1, -4),
+            Position = UDim2.new((i - 1) / count, 2, 0, 2),
+            BackgroundColor3 = i == 1 and theme.accent or theme.panel2,
+            Text = def[1],
+            TextColor3 = i == 1 and Color3.fromRGB(20, 20, 25) or theme.subtext,
+            TextSize = 12,
+            Font = Enum.Font.GothamBold,
+            AutoButtonColor = false,
+            BorderSizePixel = 0,
+        })
+        btn.Parent = TabBar
+        local corner = new("UICorner", { CornerRadius = UDim.new(0, 6) })
+        corner.Parent = btn
+        TabButtons[i] = btn
+
+        -- Page container
+        local page = new("ScrollingFrame", {
+            Name = "Page_" .. def[1],
+            Size = UDim2.new(1, -12, 1, -12),
+            Position = UDim2.new(0, 6, 0, 6),
+            BackgroundTransparency = 1,
+            ScrollBarThickness = 4,
+            CanvasSize = UDim2.new(0, 0, 0, 0),
+            AutomaticCanvasSize = Enum.AutomaticSize.Y,
+            Visible = i == 1,
+        })
+        page.Parent = Window
+        Pages[i] = page
+
+        btn.MouseButton1Click:Connect(function()
+            for j, b in ipairs(TabButtons) do
+                b.BackgroundColor3 = (j == i) and theme.accent or theme.panel2
+                b.TextColor3 = (j == i) and Color3.fromRGB(20, 20, 25) or theme.subtext
+            end
+            for j, p in ipairs(Pages) do p.Visible = (j == i) end
+        end)
+    end
+end
+
+-- UI helpers
+local function addSection(page, title)
+    local sec = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundColor3 = theme.panel,
+        BorderSizePixel = 0,
+    }, {
+        new("UICorner", { CornerRadius = UDim.new(0, 8) }),
+        new("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8) }),
+        new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }),
+        new("TextLabel", {
+            LayoutOrder = 0,
+            Size = UDim2.new(1, 0, 0, 22),
+            BackgroundTransparency = 1,
+            Text = title,
+            TextColor3 = theme.accent,
+            TextSize = 13,
+            Font = Enum.Font.GothamBold,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }),
+    })
+    sec.Parent = page
+    return sec
+end
+
+local function addParagraph_note(section, content)
+    local lbl = new("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1,
+        Text = content,
+        TextColor3 = theme.subtext,
+        TextSize = 11,
+        Font = Enum.Font.Gotham,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextWrapped = true,
+    })
+    lbl.Parent = section
+    return lbl
+end
+
+local function addToggle(section, text, stateKey, onChange)
+    local row = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 32),
+        BackgroundTransparency = 1,
+    }, {
+        new("TextLabel", {
+            Size = UDim2.new(1, -44, 1, 0),
+            BackgroundTransparency = 1,
+            Text = text,
+            TextColor3 = theme.text,
+            TextSize = 13,
+            Font = Enum.Font.Gotham,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }),
+    })
+    row.Parent = section
+
+    local btn = new("TextButton", {
+        Size = UDim2.fromOffset(36, 20),
+        Position = UDim2.new(1, -40, 0, 6),
+        BackgroundColor3 = theme.toggleOff,
+        Text = "",
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+    }, {
+        new("UICorner", { CornerRadius = UDim.new(1, 0) }),
+    })
+    btn.Parent = row
+
+    local knob = new("Frame", {
+        Size = UDim2.fromOffset(14, 14),
+        Position = UDim2.new(0, 3, 0, 3),
+        BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+    }, {
+        new("UICorner", { CornerRadius = UDim.new(1, 0) }),
+    })
+    knob.Parent = btn
+
+    local function refresh()
+        local on = State[stateKey]
+        btn.BackgroundColor3 = on and theme.toggleOn or theme.toggleOff
+        knob.Position = on and UDim2.new(0, 19, 0, 3) or UDim2.new(0, 3, 0, 3)
+    end
+    btn.MouseButton1Click:Connect(function()
+        State[stateKey] = not State[stateKey]
+        refresh()
+        if onChange then pcall(onChange, State[stateKey]) end
+    end)
+    refresh()
+end
+
+local function addSlider(section, text, min, max, default, suffix, onChanged)
+    local value = default
+    local row = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 44),
+        BackgroundTransparency = 1,
+    }, {
+        new("TextLabel", {
+            Name = "Lbl",
+            Size = UDim2.new(1, 0, 0, 18),
+            BackgroundTransparency = 1,
+            Text = text .. ": " .. default .. (suffix or ""),
+            TextColor3 = theme.text,
+            TextSize = 13,
+            Font = Enum.Font.Gotham,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }),
+        new("Frame", {
+            Name = "Bar",
+            Size = UDim2.new(1, -20, 0, 6),
+            Position = UDim2.new(0, 0, 0, 28),
+            BackgroundColor3 = Color3.fromRGB(50, 52, 64),
+            BorderSizePixel = 0,
+        }, {
+            new("UICorner", { CornerRadius = UDim.new(1, 0) }),
+            new("Frame", {
+                Name = "Fill",
+                Size = UDim2.new((default - min) / (max - min), 0, 1, 0),
+                BackgroundColor3 = theme.accent,
+                BorderSizePixel = 0,
+            }, { new("UICorner", { CornerRadius = UDim.new(1, 0) }) }),
+        }),
+    })
+    row.Parent = section
+
+    local bar = row.Bar
+    local fill = bar.Fill
+    local lbl = row.Lbl
+    local dragging = false
+
+    local function setFromX(x)
+        local rel = math.clamp((x - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
+        value = math.floor(min + rel * (max - min) + 0.5)
+        fill.Size = UDim2.new(rel, 0, 1, 0)
+        lbl.Text = text .. ": " .. value .. (suffix or "")
+        if onChanged then pcall(onChanged, value) end
+    end
+
+    bar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            setFromX(input.Position.X)
+        end
+    end)
+    UIS.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end)
+    UIS.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            setFromX(input.Position.X)
+        end
+    end)
+    return row
+end
+
+local function addButton(section, text, onClick)
+    local btn = new("TextButton", {
+        Size = UDim2.new(1, 0, 0, 32),
+        BackgroundColor3 = theme.panel2,
+        Text = text,
+        TextColor3 = theme.text,
+        TextSize = 13,
+        Font = Enum.Font.GothamBold,
+        AutoButtonColor = true,
+        BorderSizePixel = 0,
+    }, { new("UICorner", { CornerRadius = UDim.new(0, 7) }) })
+    btn.Parent = section
+    btn.MouseButton1Click:Connect(function()
+        pcall(onClick)
+    end)
+    return btn
+end
+
+local function addInput(section, text, placeholder, onSubmit)
+    local row = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 56),
+        BackgroundTransparency = 1,
+    }, {
+        new("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 18),
+            BackgroundTransparency = 1,
+            Text = text,
+            TextColor3 = theme.text,
+            TextSize = 13,
+            Font = Enum.Font.Gotham,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }),
+        new("TextBox", {
+            Name = "Box",
+            Size = UDim2.new(1, 0, 0, 30),
+            Position = UDim2.new(0, 0, 0, 22),
+            BackgroundColor3 = Color3.fromRGB(14, 15, 20),
+            PlaceholderText = placeholder,
+            PlaceholderColor3 = theme.subtext,
+            Text = "",
+            TextColor3 = theme.text,
+            TextSize = 13,
+            Font = Enum.Font.Gotham,
+            ClearTextOnFocus = false,
+            BorderSizePixel = 0,
+        }, { new("UICorner", { CornerRadius = UDim.new(0, 6) }) }),
+    })
+    row.Parent = section
+    row.Box.FocusLost:Connect(function(enterPressed)
+        if enterPressed and onSubmit then pcall(onSubmit, row.Box.Text) end
+    end)
+    return row
+end
+
+local function addDropdown(section, text, options, defaultIdx, onChange)
+    local selected = options[defaultIdx or 1]
+    local row = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 60),
+        BackgroundTransparency = 1,
+    }, {
+        new("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 18),
+            BackgroundTransparency = 1,
+            Text = text,
+            TextColor3 = theme.text,
+            TextSize = 13,
+            Font = Enum.Font.Gotham,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }),
+        new("TextButton", {
+            Name = "Btn",
+            Size = UDim2.new(1, 0, 0, 32),
+            Position = UDim2.new(0, 0, 0, 22),
+            BackgroundColor3 = Color3.fromRGB(14, 15, 20),
+            Text = selected,
+            TextColor3 = theme.text,
+            TextSize = 13,
+            Font = Enum.Font.Gotham,
+            AutoButtonColor = true,
+            BorderSizePixel = 0,
+        }, {
+            new("UICorner", { CornerRadius = UDim.new(0, 6) }),
+        }),
+    })
+    row.Parent = section
+
+    local btn = row.Btn
+    local listFrame = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 0),
+        Position = UDim2.new(0, 0, 0, 58),
+        BackgroundColor3 = Color3.fromRGB(14, 15, 20),
+        Visible = false,
+        BorderSizePixel = 0,
+        ZIndex = 5,
+    }, {
+        new("UICorner", { CornerRadius = UDim.new(0, 6) }),
+        new("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }),
+        new("UIPadding", { PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4) }),
+    })
+    listFrame.Parent = row
+
+    local function close()
+        listFrame.Visible = false
+        listFrame.Size = UDim2.new(1, 0, 0, 0)
+    end
+
+    btn.MouseButton1Click:Connect(function()
+        listFrame.Visible = not listFrame.Visible
+        if listFrame.Visible then
+            listFrame.Size = UDim2.new(1, 0, 0, #options * 30 + 8)
+        else
+            close()
+        end
+    end)
+
+    for _, opt in ipairs(options) do
+        local optBtn = new("TextButton", {
+            Size = UDim2.new(1, -8, 0, 26),
+            BackgroundColor3 = opt == selected and theme.accent or Color3.fromRGB(30, 32, 42),
+            Text = opt,
+            TextColor3 = opt == selected and Color3.fromRGB(20, 20, 25) or theme.text,
+            TextSize = 12,
+            Font = Enum.Font.Gotham,
+            AutoButtonColor = true,
+            BorderSizePixel = 0,
+        }, { new("UICorner", { CornerRadius = UDim.new(0, 5) }) })
+        optBtn.Parent = listFrame
+        optBtn.MouseButton1Click:Connect(function()
+            selected = opt
+            btn.Text = opt
+            close()
+            if onChange then pcall(onChange, opt) end
+        end)
+    end
+
+    return row, function(newOptions)
+        for _, child in ipairs(listFrame:GetChildren()) do
+            if child:IsA("TextButton") then child:Destroy() end
+        end
+        options = newOptions
+        selected = newOptions[1]
+        btn.Text = selected
+    end
+end
+
+local function addColorPicker(section, text, defaultColor, onChanged)
+    local row = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 32),
+        BackgroundTransparency = 1,
+    }, {
+        new("TextLabel", {
+            Size = UDim2.new(1, -40, 1, 0),
+            BackgroundTransparency = 1,
+            Text = text,
+            TextColor3 = theme.text,
+            TextSize = 13,
+            Font = Enum.Font.Gotham,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }),
+    })
+    row.Parent = section
+    local swatch = new("TextButton", {
+        Size = UDim2.fromOffset(32, 20),
+        Position = UDim2.new(1, -36, 0, 6),
+        BackgroundColor3 = defaultColor,
+        Text = "",
+        AutoButtonColor = true,
+        BorderSizePixel = 0,
+    }, { new("UICorner", { CornerRadius = UDim.new(0, 5) }) })
+    swatch.Parent = row
+    -- siklus warna sederhana (merah -> hijau -> biru -> putih -> kembali)
+    local cycle = {
+        Color3.fromRGB(255, 80, 80),
+        Color3.fromRGB(80, 255, 120),
+        Color3.fromRGB(80, 140, 255),
+        Color3.fromRGB(255, 255, 255),
+        defaultColor,
+    }
+    local idx = 1
+    for i, c in ipairs(cycle) do
+        if c == defaultColor then idx = i break end
+    end
+    swatch.MouseButton1Click:Connect(function()
+        idx = idx % #cycle + 1
+        swatch.BackgroundColor3 = cycle[idx]
+        if onChanged then pcall(onChanged, cycle[idx]) end
+    end)
+end
+
+local function notify(title, content, duration)
+    local n = new("Frame", {
+        Size = UDim2.fromOffset(280, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        Position = UDim2.new(1, -290, 0, 10),
+        BackgroundColor3 = theme.panel,
+        BorderSizePixel = 0,
+    }, {
+        new("UICorner", { CornerRadius = UDim.new(0, 8) }),
+        new("UIStroke", { Color = theme.accent, Thickness = 1, Transparency = 0.5 }),
+        new("UIPadding", { PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12), PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8) }),
+        new("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }),
+        new("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 18),
+            BackgroundTransparency = 1,
+            Text = title,
+            TextColor3 = theme.accent,
+            TextSize = 13,
+            Font = Enum.Font.GothamBold,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }),
+        new("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 0),
+            AutomaticSize = Enum.AutomaticSize.Y,
+            BackgroundTransparency = 1,
+            Text = content or "",
+            TextColor3 = theme.text,
+            TextSize = 12,
+            Font = Enum.Font.Gotham,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextWrapped = true,
+        }),
+    })
+    n.Parent = ScreenGui
+    -- animasi masuk
+    n.Position = UDim2.new(1, -290, 0, 10)
+    task.delay(duration or 5, function()
+        pcall(function() n:Destroy() end)
+    end)
+    -- susun notifikasi ke bawah
+    task.wait(0.1)
+    local y = 10
+    for _, child in ipairs(ScreenGui:GetChildren()) do
+        if child:IsA("Frame") and child ~= Window and child.Name ~= "Notification" then
+            child.Position = UDim2.new(1, -290, 0, y)
+            y = y + child.AbsoluteSize.Y + 10
+        end
+    end
+end
 
 -- ============================================================
--- COOKING TAB
+-- BUILD UI
 -- ============================================================
-Tabs.Cook:CreateSection("Auto Cooking")
-Tabs.Cook:CreateToggle({
-    Name = "Auto-Cook (masak)",
-    CurrentValue = false,
-    Flag = "AutoCook",
-    Callback = function(v)
-        State.autoCook = v
-        startAutoLoops()
-    end
-})
+buildTabs()
 
--- ============================================================
--- SERVING TAB
--- ============================================================
-Tabs.Serve:CreateSection("Auto Serving")
-Tabs.Serve:CreateToggle({
-    Name = "Auto-Serve (layani pelanggan)",
-    CurrentValue = false,
-    Flag = "AutoServe",
-    Callback = function(v)
-        State.autoServe = v
-        startAutoLoops()
-    end
-})
+-- ============ TAB 1: FARM ============
+local secFarm = addSection(Pages[1], "AUTO FARMING")
+addToggle(secFarm, "Auto-Farm (tanam & panen)", "autoFarm", function(v)
+    startAutoLoops()
+end)
+addToggle(secFarm, "Auto-Cook (masak)", "autoCook", function(v)
+    startAutoLoops()
+end)
+addToggle(secFarm, "Auto-Serve (layani pelanggan)", "autoServe", function(v)
+    startAutoLoops()
+end)
+addToggle(secFarm, "Auto-Buy / Upgrade", "autoBuy", function(v)
+    startAutoLoops()
+end)
+addParagraph_note(secFarm, "Keyword di Config (atas script) menentukan objek yang diinteraksi. Kalau tidak akurat, klik SCAN di tab VIS.")
 
--- ============================================================
--- SHOPPING TAB
--- ============================================================
-Tabs.Shop:CreateSection("Auto Shopping")
-Tabs.Shop:CreateToggle({
-    Name = "Auto-Buy / Upgrade",
-    CurrentValue = false,
-    Flag = "AutoBuy",
-    Callback = function(v)
-        State.autoBuy = v
-        startAutoLoops()
-    end
-})
-Tabs.Shop:CreateParagraph({
-    Title = "Peringatan",
-    Content = "Auto-Buy berinteraksi dengan prompt beli/upgrade terdekat. Matikan kalau takut salah beli."
-})
+-- ============ TAB 2: MOVE ============
+local secMove = addSection(Pages[2], "SPEED & JUMP")
+addToggle(secMove, "Speed Boost", "speed", setSpeed)
+addSlider(secMove, "WalkSpeed", 16, 120, Config.DefaultWalkSpeed, "", function(v)
+    Config.DefaultWalkSpeed = v
+    if State.speed then pcall(applySpeed) end
+end)
+addSlider(secMove, "JumpPower", 50, 300, Config.DefaultJumpPower, "", function(v)
+    Config.DefaultJumpPower = v
+    if State.speed then pcall(applySpeed) end
+end)
+local secUtil = addSection(Pages[2], "UTILITY")
+addToggle(secUtil, "Anti-AFK", "antiAfk", setAntiAfk)
+addToggle(secUtil, "Infinite Jump", "infJump", setInfJump)
 
--- ============================================================
--- MOVEMENT TAB
--- ============================================================
-Tabs.Move:CreateSection("Speed & Jump")
-Tabs.Move:CreateToggle({
-    Name = "Speed Boost",
-    CurrentValue = false,
-    Flag = "SpeedBoost",
-    Callback = function(v)
-        State.speed = v
-        setSpeed(v)
+-- ============ TAB 3: TELE ============
+local secTele = addSection(Pages[3], "TELEPORT")
+local teleDropdown, teleSetOptions = addDropdown(secTele, "Pilih Lokasi", { "Stall", "Dapur", "Farm", "Pulau", "Spawn", "Market" }, 1, function(opt)
+    if not opt then return end
+    local part = findPartsByKeywords({ opt })[1]
+    if part and teleportTo(part) then
+        notify("Teleport", "Ke " .. opt, 4)
+    else
+        notify("Teleport", "Lokasi '" .. opt .. "' tidak ditemukan", 4)
     end
-})
-Tabs.Move:CreateSlider({
-    Name = "WalkSpeed",
-    Range = { 16, 120 },
-    Increment = 1,
-    CurrentValue = Config.DefaultWalkSpeed,
-    Flag = "WalkSpeed",
-    Callback = function(v)
-        Config.DefaultWalkSpeed = v
-        if State.speed then pcall(applySpeed) end
+end)
+addButton(secTele, "Scan & Teleport ke Lokasi Terdekat", function()
+    local root = hrp()
+    if not root then notify("Teleport", "Karakter belum spawn", 4) return end
+    local parts = findPartsByKeywords(Config.TeleportSpots)
+    local best, bestDist = nil, math.huge
+    for _, p in ipairs(parts) do
+        local d = (p.Position - root.Position).Magnitude
+        if d < bestDist then best, bestDist = p, d end
     end
-})
-Tabs.Move:CreateSlider({
-    Name = "JumpPower",
-    Range = { 50, 300 },
-    Increment = 5,
-    CurrentValue = Config.DefaultJumpPower,
-    Flag = "JumpPower",
-    Callback = function(v)
-        Config.DefaultJumpPower = v
-        if State.speed then pcall(applySpeed) end
+    if best then
+        teleportTo(best)
+        notify("Teleport", "Ke " .. best.Name .. " (" .. math.floor(bestDist) .. " stud)", 5)
+    else
+        notify("Teleport", "Tidak ada spot ditemukan di sekitar", 5)
     end
-})
-Tabs.Move:CreateSection("Utility")
-Tabs.Move:CreateToggle({
-    Name = "Anti-AFK",
-    CurrentValue = false,
-    Flag = "AntiAfk",
-    Callback = function(v)
-        State.antiAfk = v
-        setAntiAfk(v)
-    end
-})
-Tabs.Move:CreateToggle({
-    Name = "Infinite Jump",
-    CurrentValue = false,
-    Flag = "InfJump",
-    Callback = function(v)
-        State.infJump = v
-        setInfJump(v)
-    end
-})
-
--- ============================================================
--- TELEPORT TAB
--- ============================================================
-Tabs.Tele:CreateSection("Teleport Lokasi")
-Tabs.Tele:CreateParagraph({
-    Title = "Cara pakai",
-    Content = "Pilih lokasi dari dropdown, atau ketik nama part di kolom Custom."
-})
-
--- Dropdown statis dengan lokasi umum (bisa diganti hasil SCAN nanti)
-local TeleDropdown = Tabs.Tele:CreateDropdown({
-    Name = "Pilih Lokasi",
-    Options = { "Stall", "Dapur", "Farm", "Pulau", "Spawn", "Market" },
-    CurrentOption = { "Stall" },
-    MultipleOptions = false,
-    Flag = "TeleportSpot",
-    Callback = function(option)
-        if not option or option == "" then return end
-        local part = findPartsByKeywords({ option })[1]
+end)
+addInput(secTele, "Teleport ke Nama Part", "cth: Stall, Dapur, Farm", function(v)
+    if v and v ~= "" then
+        local part = findPartsByKeywords({ v })[1]
         if part and teleportTo(part) then
-            Rayfield:Notify({ Title = "Teleport", Content = "Ke " .. option, Duration = 4 })
+            notify("Teleport", "Ke " .. v, 4)
         else
-            Rayfield:Notify({ Title = "Teleport", Content = "Lokasi '" .. option .. "' tidak ditemukan. Coba SCAN.", Duration = 5 })
+            notify("Teleport", "Part '" .. v .. "' tidak ditemukan", 4)
         end
     end
-})
+end)
 
-Tabs.Tele:CreateButton({
-    Name = "Scan & Cari Lokasi Terdekat",
-    Callback = function()
-        local root = hrp()
-        if not root then
-            Rayfield:Notify({ Title = "Teleport", Content = "Karakter belum spawn.", Duration = 4 })
-            return
-        end
-        -- Cari part teleport terdekat yang cocok keyword
-        local parts = findPartsByKeywords(Config.TeleportSpots)
-        local best, bestDist = nil, math.huge
-        for _, p in ipairs(parts) do
-            local d = (p.Position - root.Position).Magnitude
-            if d < bestDist then
-                best, bestDist = p, d
-            end
-        end
-        if best then
-            teleportTo(best)
-            Rayfield:Notify({
-                Title = "Teleport",
-                Content = "Ke " .. best.Name .. " (" .. math.floor(bestDist) .. " stud)",
-                Duration = 5
-            })
-        else
-            Rayfield:Notify({ Title = "Teleport", Content = "Tidak ada spot ditemukan di sekitar.", Duration = 5 })
-        end
-    end
-})
-
-Tabs.Tele:CreateSection("Custom")
-Tabs.Tele:CreateInput({
-    Name = "Teleport ke Nama Part",
-    PlaceholderText = "cth: Stall, Dapur, Farm",
-    RemoveTextAfterFocusLost = false,
-    Callback = function(v)
-        if v and v ~= "" then
-            local part = findPartsByKeywords({ v })[1]
-            if part and teleportTo(part) then
-                Rayfield:Notify({ Title = "Teleport", Content = "Ke " .. v, Duration = 4 })
-            else
-                Rayfield:Notify({ Title = "Teleport", Content = "Part '" .. v .. "' tidak ditemukan", Duration = 5 })
-            end
-        end
-    end
-})
+-- ============ TAB 4: VIS ============
+local secEsp = addSection(Pages[4], "ESP")
+addToggle(secEsp, "ESP (highlight pemain & objek)", "esp", setESP)
+addColorPicker(secEsp, "Warna ESP Pemain", Config.EspPlayerColor, function(c)
+    Config.EspPlayerColor = c
+    if State.esp then pcall(refreshESP) end
+end)
+addColorPicker(secEsp, "Warna ESP Objek", Config.EspItemColor, function(c)
+    Config.EspItemColor = c
+    if State.esp then pcall(refreshESP) end
+end)
+local secTool = addSection(Pages[4], "TOOLS")
+addButton(secTool, "SCAN — Dump Nama Objek", runScanner)
+addButton(secTool, "Respawn Karakter", function()
+    local h = hum()
+    if h then pcall(function() h.Health = 0 end) end
+end)
 
 -- ============================================================
--- VISUAL TAB
+-- FINALIZE
 -- ============================================================
-Tabs.Visual:CreateSection("ESP")
-Tabs.Visual:CreateToggle({
-    Name = "ESP (highlight pemain & objek)",
-    CurrentValue = false,
-    Flag = "ESP",
-    Callback = function(v)
-        State.esp = v
-        setESP(v)
-    end
-})
-Tabs.Visual:CreateColorPicker({
-    Name = "Warna ESP Pemain",
-    Color = Config.EspPlayerColor,
-    Flag = "EspPlayerColor",
-    Callback = function(c)
-        Config.EspPlayerColor = c
-        if State.esp then pcall(refreshESP) end
-    end
-})
-Tabs.Visual:CreateColorPicker({
-    Name = "Warna ESP Objek",
-    Color = Config.EspItemColor,
-    Flag = "EspItemColor",
-    Callback = function(c)
-        Config.EspItemColor = c
-        if State.esp then pcall(refreshESP) end
-    end
-})
-Tabs.Visual:CreateSection("Tools")
-Tabs.Visual:CreateButton({
-    Name = "SCAN — Dump Nama Objek ke Konsol",
-    Callback = function() runScanner(Rayfield) end
-})
-Tabs.Visual:CreateButton({
-    Name = "Respawn Karakter",
-    Callback = function()
-        local h = hum()
-        if h then pcall(function() h.Health = 0 end) end
-    end
-})
 
--- ============================================================
--- NOTIFIKASI AWAL
--- ============================================================
-Rayfield:Notify({
-    Title = "Devil's Market Auto Hub",
-    Content = "Dimuat! Klik SCAN di tab Visual kalau auto-fiturnya tidak akurat.",
-    Duration = 7
-})
+notify("Devil's Market Auto Hub", "Dimuat! Klik SCAN di tab VIS kalau auto-fiturnya tidak akurat.", 7)
 
-print("[DevilMarketHub v3] Loaded — Rayfield UI")
+print("[DevilMarketHub v4] Loaded — Custom UI (tanpa library eksternal)")
+
+-- cleanup saat ScreenGui dihapus
+ScreenGui.Destroying:Connect(function()
+    -- matikan semua state (loop berhenti karena cek State[key])
+    State.autoFarm = false; State.autoCook = false
+    State.autoServe = false; State.autoBuy = false
+    State.speed = false; State.antiAfk = false; State.esp = false
+    if infJumpConn then pcall(function() infJumpConn:Disconnect() end) end
+    clearESP()
+    local h = hum()
+    if h then h.WalkSpeed = 16; h.JumpPower = 50 end
+end)
