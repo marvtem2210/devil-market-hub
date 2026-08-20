@@ -352,13 +352,11 @@ local function runScanner(Rayfield)
 end
 
 -- ============================================================
--- LOAD RAYFIELD
+-- LOAD RAYFIELD (versi resmi Sirius)
 -- ============================================================
 local Rayfield
 local ok, err = pcall(function()
-    Rayfield = loadstring(game:HttpGet(
-        "https://raw.githubusercontent.com/x2Swiftz/UI-Library/main/Libraries/Rayfield%20-%20Library.lua"
-    ))()
+    Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 end)
 if not ok then
     warn("[DevilMarketHub] Gagal load Rayfield: " .. tostring(err))
