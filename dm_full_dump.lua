@@ -1,32 +1,17 @@
 --[[
   ============================================================
-  DM FULL DUMP — Devil's Market (Pasar Setan)
-  Semua ke-dump OTOMATIS ke file txt, tanpa kerja manual.
-  Buat HP (Delta): load → tunggu → buka folder Delta → kirim file.
-  ============================================================
-
-  FILE YANG DIHASILKAN (folder workspace Delta):
-    dm_instances.txt      — struktur instance lengkap (tree)
-    dm_remotes.txt        — semua RemoteEvent/RemoteFunction
-                            + kategori (farm/cook/serve/buy)
-    dm_stats.txt          — leaderstats + value player
-    dm_logic_all.txt      — script/module yang match keyword gabung
-    dm_logic_everything.txt — SEMUA script/module gabung
-    dm_logic_<nama>.lua   — tiap script/module file terpisah
-    dm_remote_logs.txt    — hook live: FireServer/InvokeServer
-                            + args (auto-save tiap 30 detik)
-
-  Catatan: semua pcall → kalau satu gagal, sisanya tetap jalan.
+  DM FULL DUMP v3 LITE — Devil's Market (Pasar Setan)
+  Versi crash-safe: logic dump dibatasi, ada jeda antar fase,
+  dm_logic_everything DIMATIKAN (penyebab crash utama).
   ============================================================
 ]]
 
 local Players = game:GetService("Players")
 local LP      = Players.LocalPlayer
 
--- State yang di-share ke UI
 local DumpState = {
-    phase     = "idle",  -- idle/tree/remotes/stats/logic/hook/done
-    files     = {},      -- { name, size }
+    phase     = "idle",
+    files     = {},
     remotes   = 0,
     scripts   = 0,
     logsCount = 0,
@@ -37,41 +22,33 @@ local DumpState = {
 -- HELPERS
 -- ============================================================
 local function saveFile(name, content)
-    local ok, err = pcall(function()
-        writefile(name, content)
-    end)
+    local ok, err = pcall(writefile, name, content)
     if ok then
-        print("[FULLDUMP] OK  " .. name .. "  (" .. math.floor(#content / 1024) .. " KB)")
-        DumpState.files[#DumpState.files+1] = {
-            name = name,
-            size = math.floor(#content / 1024),
-        }
+        print("[DUMP] OK  " .. name .. "  (" .. math.floor(#content/1024) .. " KB)")
+        DumpState.files[#DumpState.files+1] = { name=name, size=math.floor(#content/1024) }
     else
-        print("[FULLDUMP] GAGAL " .. name .. "  " .. tostring(err))
+        print("[DUMP] GAGAL " .. name .. " — " .. tostring(err))
     end
     return ok
 end
 
 local function notify(text, dur)
     pcall(function()
-        game:GetService("StarterGui"):SetCore("SendNotification", {
-            Title    = "Full Dump",
-            Text     = text,
-            Duration = dur or 5,
-        })
+        game:GetService("StarterGui"):SetCore("SendNotification",{
+            Title="Full Dump", Text=text, Duration=dur or 5 })
     end)
 end
 
 -- ============================================================
--- 1) TREE INSTANCE — struktur lengkap
--- FIX: hapus LP duplikat dari roots (sudah ada di Players)
--- FIX: hilangkan skip-children Script — ModuleScript nested tetap ter-walk
--- FIX: pcall per-child biar satu error tidak stop loop
+-- 1) TREE INSTANCE
+-- Dibatasi depth 8 + pcall per child + skip Workspace.Terrain
 -- ============================================================
 local function dumpTree()
     local lines = {}
     local function walk(inst, depth)
-        if depth > 12 then return end
+        if depth > 8 then return end
+        -- skip Terrain (sangat besar, tidak berguna)
+        if inst.ClassName == "Terrain" then return end
         local pad = string.rep("  ", depth)
         local val = ""
         pcall(function()
@@ -84,28 +61,32 @@ local function dumpTree()
             end
         end)
         lines[#lines+1] = ("%s%s [%s]%s"):format(pad, inst.Name, inst.ClassName, val)
-        -- FIX: walk semua children tanpa kecuali (sebelumnya skip Script dll)
-        local ok2, children = pcall(function() return inst:GetChildren() end)
-        if ok2 then
-            for _, c in ipairs(children) do
-                pcall(walk, c, depth + 1)
+        local ok, ch = pcall(function() return inst:GetChildren() end)
+        if ok then
+            for _, c in ipairs(ch) do
+                pcall(walk, c, depth+1)
             end
         end
     end
 
-    -- FIX: LP dihapus dari sini — sudah tercakup dalam Players:GetChildren()
     local roots = {
         game:GetService("ReplicatedStorage"),
         game:GetService("ReplicatedFirst"),
-        game:GetService("Workspace"),
         game:GetService("Players"),
     }
+    -- Workspace terpisah — hanya 1 level langsung (tidak recursive penuh)
+    pcall(function()
+        lines[#lines+1] = ""
+        lines[#lines+1] = "----- Workspace (depth 6) -----"
+        for _, c in ipairs(workspace:GetChildren()) do
+            pcall(walk, c, 1)
+        end
+    end)
     for _, r in ipairs(roots) do
         pcall(function()
             lines[#lines+1] = ""
             lines[#lines+1] = "----- " .. r:GetFullName() .. " -----"
-            local ch = r:GetChildren()
-            for _, c in ipairs(ch) do
+            for _, c in ipairs(r:GetChildren()) do
                 pcall(walk, c, 1)
             end
         end)
@@ -114,20 +95,20 @@ local function dumpTree()
 end
 
 -- ============================================================
--- 2) REMOTES — semua + kategori
+-- 2) REMOTES
 -- ============================================================
 local REMOTE_KW = {
-    farm  = { "farm","plant","harvest","seed","tanam","panen","water","grow","crop" },
-    cook  = { "cook","recipe","craft","make","masak","process","brew","bake" },
-    serve = { "serve","deliver","order","complete","customer","layani","antar","give" },
-    buy   = { "buy","purchase","upgrade","unlock","beli","shop","store","acquire" },
+    farm  = {"farm","plant","harvest","seed","tanam","panen","water","grow","crop"},
+    cook  = {"cook","recipe","craft","make","masak","process","brew","bake"},
+    serve = {"serve","deliver","order","complete","customer","layani","antar","give"},
+    buy   = {"buy","purchase","upgrade","unlock","beli","shop","store","acquire"},
 }
 
 local function remoteCat(name)
     local n = string.lower(name or "")
     for cat, kws in pairs(REMOTE_KW) do
         for _, kw in ipairs(kws) do
-            if n:find(kw, 1, true) then return cat end
+            if n:find(kw,1,true) then return cat end
         end
     end
     return "?"
@@ -135,7 +116,7 @@ end
 
 local function dumpRemotes()
     local all   = {}
-    local byCat = { farm = {}, cook = {}, serve = {}, buy = {}, ["?"] = {} }
+    local byCat = { farm={}, cook={}, serve={}, buy={}, ["?"]={} }
     for _, obj in ipairs(game:GetDescendants()) do
         pcall(function()
             if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
@@ -146,53 +127,45 @@ local function dumpRemotes()
         end)
     end
     local lines = {
-        "======================================================",
+        "====================================================",
         "  DEVIL'S MARKET — REMOTE DUMP",
-        "  Di-generate: " .. os.date("%Y-%m-%d %H:%M:%S"),
-        "======================================================",
-        "",
-        ("TOTAL: %d remote"):format(#all),
-        "",
+        "  " .. os.date("%Y-%m-%d %H:%M:%S"),
+        "====================================================",
+        "", ("TOTAL: %d remote"):format(#all), "",
     }
     for cat, list in pairs(byCat) do
         table.sort(list)
         lines[#lines+1] = ("-- %s (%d) --"):format(string.upper(cat), #list)
-        for _, l in ipairs(list) do lines[#lines+1] = "  " .. l end
+        for _, l in ipairs(list) do lines[#lines+1] = "  "..l end
         lines[#lines+1] = ""
     end
-    lines[#lines+1] = "-- SEMUA (urut) --"
+    lines[#lines+1] = "-- SEMUA --"
     table.sort(all)
-    for _, l in ipairs(all) do lines[#lines+1] = "  " .. l end
+    for _, l in ipairs(all) do lines[#lines+1] = "  "..l end
     saveFile("dm_remotes.txt", table.concat(lines, "\n"))
     DumpState.remotes = #all
 
-    -- Share ke _G buat hub/spy
+    -- share ke _G
     pcall(function()
         _G.DMHubRemoteData = _G.DMHubRemoteData or {
-            farm = {}, cook = {}, serve = {}, buy = {}, updated = 0,
+            farm={}, cook={}, serve={}, buy={}, updated=0,
         }
         for _, obj in ipairs(game:GetDescendants()) do
             pcall(function()
                 if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
                     local cat = remoteCat(obj.Name)
-                    if cat ~= "?" then
-                        local path = obj:GetFullName()
-                        local data = _G.DMHubRemoteData[cat]
-                        local dup  = false
-                        for _, e in ipairs(data) do
-                            if e.path == path then dup = true; break end
-                        end
-                        if not dup then
-                            table.insert(data, {
-                                path       = path,
-                                className  = obj.ClassName,
-                                name       = obj.Name,
-                                fireCount  = 0,
-                                lastArgsRaw = nil,
-                                lastArgsStr = "",
-                                lastTime   = "",
-                            })
-                        end
+                    if cat == "?" then return end
+                    local path = obj:GetFullName()
+                    local data = _G.DMHubRemoteData[cat]
+                    local dup  = false
+                    for _, e in ipairs(data) do
+                        if e.path == path then dup=true; break end
+                    end
+                    if not dup then
+                        table.insert(data, {
+                            path=path, className=obj.ClassName, name=obj.Name,
+                            fireCount=0, lastArgsRaw=nil, lastArgsStr="", lastTime="",
+                        })
                     end
                 end
             end)
@@ -202,13 +175,12 @@ local function dumpRemotes()
 end
 
 -- ============================================================
--- 3) STATS — leaderstats + value player
--- FIX: tambah depth limit di walk (cegah stack overflow)
+-- 3) STATS — leaderstats + semua children LP
 -- ============================================================
 local function dumpStats()
     local lines = {}
     local function walk(inst, depth)
-        if depth > 10 then return end  -- FIX: depth limit
+        if depth > 8 then return end
         local pad = string.rep("  ", depth)
         local val = ""
         pcall(function()
@@ -221,15 +193,13 @@ local function dumpStats()
             end
         end)
         lines[#lines+1] = ("%s%s [%s]%s"):format(pad, inst.Name, inst.ClassName, val)
-        local ok2, ch = pcall(function() return inst:GetChildren() end)
-        if ok2 then
-            for _, c in ipairs(ch) do
-                pcall(walk, c, depth + 1)
-            end
+        local ok, ch = pcall(function() return inst:GetChildren() end)
+        if ok then
+            for _, c in ipairs(ch) do pcall(walk, c, depth+1) end
         end
     end
 
-    lines[#lines+1] = "===== STATS PLAYER: " .. LP.Name .. " ====="
+    lines[#lines+1] = "===== STATS: " .. LP.Name .. " ====="
     local ls = LP:FindFirstChild("leaderstats")
     if ls then
         lines[#lines+1] = "-- leaderstats --"
@@ -238,38 +208,26 @@ local function dumpStats()
         lines[#lines+1] = "(leaderstats TIDAK ADA)"
     end
     lines[#lines+1] = ""
-    lines[#lines+1] = "-- Value di LocalPlayer --"
-    for _, c in ipairs(LP:GetChildren()) do
-        pcall(function()
-            if c:IsA("ValueBase") then
-                lines[#lines+1] = "  " .. c:GetFullName() .. " = " .. tostring(c.Value)
-            end
-        end)
-    end
-    -- Dump SEMUA children LP (Folder, dll) buat cari Inventory/Backpack data
-    lines[#lines+1] = ""
-    lines[#lines+1] = "-- Semua children LP (depth 3) --"
+    lines[#lines+1] = "-- Semua children LP --"
     for _, c in ipairs(LP:GetChildren()) do
         pcall(walk, c, 1)
     end
-    -- Attributes
     pcall(function()
         local attrs = LP:GetAttributes()
         local n = 0
         for k, v in pairs(attrs) do
-            if n == 0 then lines[#lines+1] = ""; lines[#lines+1] = "-- Attributes LP --" end
-            lines[#lines+1] = "  " .. k .. " = " .. tostring(v)
-            n = n + 1
+            if n == 0 then lines[#lines+1]=""; lines[#lines+1]="-- Attributes --" end
+            lines[#lines+1] = "  "..k.." = "..tostring(v)
+            n = n+1
         end
     end)
     saveFile("dm_stats.txt", table.concat(lines, "\n"))
 end
 
 -- ============================================================
--- 4) LOGIC — semua source script/module
--- FIX: satu pass loop (tidak loop dua kali untuk combined + everything)
--- FIX: pcall per-inst di dalam loop (sebelumnya satu error stop semua)
--- FIX: file terpisah di-track ke DumpState.files
+-- 4) LOGIC — HANYA script yang match keyword, MAX 50 file
+--    dm_logic_everything DIMATIKAN (penyebab crash utama)
+--    Tiap file: max 100KB. Total combined: max 2MB.
 -- ============================================================
 local LOGIC_KEYWORDS = {
     "recipe","craft","cook","food","menu","product",
@@ -279,140 +237,127 @@ local LOGIC_KEYWORDS = {
     "inventory","item","material","ingredient",
     "upgrade","shop","store","price","market","economy",
     "config","settings","manager","service","handler",
-    "main","init","client","server","loader","game",
+    "main","init","client","server","loader",
 }
 
 local function matchesKw(name)
     local n = string.lower(name or "")
     for _, kw in ipairs(LOGIC_KEYWORDS) do
-        if n:find(kw, 1, true) then return true end
+        if n:find(kw,1,true) then return true end
     end
     return false
 end
 
 local function getSource(inst)
     local ok, src = pcall(function() return inst.Source end)
-    if ok and type(src) == "string" and #src > 0 then return src end
+    if ok and type(src)=="string" and #src>0 then return src end
     local ok2, s2 = pcall(function()
         if decompile then return decompile(inst) end
-        if getscriptbytecode then return getscriptbytecode(inst) end
         return nil
     end)
-    if ok2 and type(s2) == "string" and #s2 > 0 then
-        return s2 .. "\n-- [decompiled]"
+    if ok2 and type(s2)=="string" and #s2>0 then
+        return s2.."\n-- [decompiled]"
     end
     return nil
 end
 
+local COMBINED_MAX = 2 * 1024 * 1024  -- 2MB total
+local FILE_MAX     = 100 * 1024        -- 100KB per file
+local MATCH_MAX    = 50                -- max 50 file terpisah
+
 local function dumpLogic()
-    local combined      = {}  -- script match keyword
-    local everything    = {}  -- semua script
-    local combinedSize  = 0
-    local everythingSize = 0
-    local savedSeparate = 0
-    local total         = 0
+    local combined     = {}
+    local combinedSize = 0
+    local matched      = 0
+    local total        = 0
 
     local roots = {
         game:GetService("ReplicatedStorage"),
         game:GetService("ReplicatedFirst"),
-        game:GetService("Workspace"),
-        game:GetService("StarterGui"),
-        game:GetService("StarterPack"),
         LP,
     }
 
-    -- FIX: satu pass loop, isi dua list sekaligus
     for _, root in ipairs(roots) do
+        if combinedSize >= COMBINED_MAX then break end
+        if matched >= MATCH_MAX then break end
         pcall(function()
             for _, inst in ipairs(root:GetDescendants()) do
-                -- FIX: pcall per-inst, satu error tidak stop loop
+                if combinedSize >= COMBINED_MAX then break end
+                if matched >= MATCH_MAX then break end
                 pcall(function()
                     if not (inst:IsA("Script") or inst:IsA("LocalScript") or inst:IsA("ModuleScript")) then
                         return
                     end
                     total = total + 1
+                    if not matchesKw(inst.Name) then return end
+
                     local src = getSource(inst)
-                    if not src or #src < 50 then return end
-                    -- batasi per-file 500KB
-                    if #src > 500000 then src = src:sub(1, 500000) .. "\n-- [TRUNCATED]" end
+                    if not src or #src < 20 then return end
+                    -- potong per-file
+                    if #src > FILE_MAX then
+                        src = src:sub(1, FILE_MAX).."\n-- [TRUNCATED 100KB]"
+                    end
 
                     local header = ("--===== %s [%s] (%d chars) =====--\n"):format(
                         inst:GetFullName(), inst.ClassName, #src)
-                    local block  = header .. src .. "\n\n"
+                    local block  = header..src.."\n\n"
+                    combined[#combined+1] = block
+                    combinedSize = combinedSize + #block
 
-                    -- everything: semua script
-                    everything[#everything+1] = block
-                    everythingSize = everythingSize + #block
-
-                    -- combined: hanya yang match keyword
-                    if matchesKw(inst.Name) then
-                        combined[#combined+1] = block
-                        combinedSize = combinedSize + #block
-
-                        -- file terpisah per script yang match
-                        local fname = ("dm_logic_%s.lua"):format(
-                            inst.Name:gsub("[^%w_]", "_"):sub(1, 40))
-                        local ok3 = pcall(function() writefile(fname, header .. src) end)
-                        if ok3 then
-                            -- FIX: track file terpisah ke DumpState
-                            DumpState.files[#DumpState.files+1] = {
-                                name = fname,
-                                size = math.floor(#src / 1024),
-                            }
-                            savedSeparate = savedSeparate + 1
-                        end
+                    -- file terpisah
+                    local fname = ("dm_logic_%s.lua"):format(
+                        inst.Name:gsub("[^%w_]","_"):sub(1,40))
+                    local ok3 = pcall(writefile, fname, header..src)
+                    if ok3 then
+                        DumpState.files[#DumpState.files+1] = {
+                            name=fname, size=math.floor(#src/1024) }
+                        matched = matched + 1
                     end
                 end)
+                task.wait()  -- yield tiap inst biar gak freeze
             end
         end)
     end
 
-    saveFile("dm_logic_all.txt",        table.concat(combined,   "\n"))
-    saveFile("dm_logic_everything.txt", table.concat(everything, "\n"))
+    saveFile("dm_logic_all.txt", table.concat(combined, "\n"))
     DumpState.scripts = total
-    print(string.format(
-        "[FULLDUMP] total script: %d | match keyword: %d | gabungan: %.1f MB",
-        total, savedSeparate, everythingSize / 1048576))
+    print(("[DUMP] script scan: total=%d | match=%d | combined=%.0fKB"):format(
+        total, matched, combinedSize/1024))
 end
 
 -- ============================================================
--- 5) HOOK LIVE — FireServer/InvokeServer + args → file + _G
--- FIX: selain log ke file, sekarang juga update _G.DMHubRemoteData
---      (lastArgsRaw, lastArgsStr, fireCount, lastTime) biar hub
---      dan kaitun bisa replay remote dengan args asli
+-- 5) HOOK LIVE — update _G + log file
 -- ============================================================
-local logs   = {}
-local LOG_MAX = 2000
+local logs = {}
+local LOG_MAX = 500  -- dikurangi dari 2000 biar hemat memory
 
 local FormatArg
 local function SerializeTable(tbl, depth, visited)
     depth, visited = depth or 0, visited or {}
-    if depth >= 4 then return "{...}" end
+    if depth >= 3 then return "{...}" end
     if visited[tbl] then return "{CIRCULAR}" end
     visited[tbl] = true
     local parts = {}
     for k, v in pairs(tbl) do
-        local ks = type(k) == "string" and k or ("[" .. tostring(k) .. "]")
-        parts[#parts+1] = ks .. "=" .. FormatArg(v, depth + 1, visited)
+        local ks = type(k)=="string" and k or ("["..tostring(k).."]")
+        parts[#parts+1] = ks.."="..FormatArg(v, depth+1, visited)
     end
-    return #parts == 0 and "{}" or ("{" .. table.concat(parts, ", ") .. "}")
+    return #parts==0 and "{}" or ("{"..table.concat(parts,", ").."}")
 end
-
 FormatArg = function(arg, depth, visited)
     depth, visited = depth or 0, visited or {}
     if arg == nil then return "nil" end
     local t = typeof(arg)
     if t == "Instance" then
-        -- FIX: simpan hasil pcall langsung, jangan panggil GetFullName dua kali
         local ok2, name = pcall(function() return arg:GetFullName() end)
-        return "Inst(" .. (ok2 and name or "?") .. ")"
-    elseif t == "table"   then return SerializeTable(arg, depth, visited)
-    elseif t == "string"  then return '"' .. arg:sub(1, 100) .. '"'
-    elseif t == "Vector3" then return ("V3(%.1f,%.1f,%.1f)"):format(arg.X, arg.Y, arg.Z)
-    elseif t == "CFrame"  then
+        return "Inst("..(ok2 and name or "?")..")"
+    elseif t == "table"    then return SerializeTable(arg, depth, visited)
+    elseif t == "string"   then return '"'..arg:sub(1,80)..'"'
+    elseif t == "Vector3"  then return ("V3(%.1f,%.1f,%.1f)"):format(arg.X,arg.Y,arg.Z)
+    elseif t == "CFrame"   then
         local p = arg.Position
-        return ("CF(%.1f,%.1f,%.1f)"):format(p.X, p.Y, p.Z)
-    elseif t == "EnumItem" then return "Enum." .. tostring(arg)
+        return ("CF(%.1f,%.1f,%.1f)"):format(p.X,p.Y,p.Z)
+    elseif t == "EnumItem" then return "Enum."..tostring(arg)
     end
     return tostring(arg)
 end
@@ -426,58 +371,51 @@ local function flushLogs()
     local count = #lines
     logs = {}
     DumpState.logsCount = DumpState.logsCount + count
-    local ok = pcall(function()
+    pcall(function()
         local prev = readfile and readfile("dm_remote_logs.txt") or ""
-        writefile("dm_remote_logs.txt", prev .. table.concat(lines, "\n") .. "\n")
+        -- jaga ukuran file log max 500KB
+        if #prev > 500000 then prev = prev:sub(-400000) end
+        writefile("dm_remote_logs.txt", prev..table.concat(lines,"\n").."\n")
     end)
-    if not ok then
-        pcall(function()
-            writefile("dm_remote_logs.txt", table.concat(lines, "\n") .. "\n")
-        end)
-    end
 end
 
 local function initHook()
     if not hookmetamethod or not getnamecallmethod then
-        print("[FULLDUMP] hookmetamethod gak ada — log live skip, dump statis tetap jalan")
+        print("[DUMP] hookmetamethod gak ada — hook skip")
         return
     end
     local wrap = newcclosure or function(f) return f end
     local old  = hookmetamethod(game, "__namecall", wrap(function(self, ...)
-        local args = { ... }
+        local args = {...}
         pcall(function()
             local method = getnamecallmethod()
-            if (method == "FireServer" or method == "InvokeServer")
+            if (method=="FireServer" or method=="InvokeServer")
             and (self:IsA("RemoteEvent") or self:IsA("RemoteFunction")) then
-                -- Serialize args buat log file
                 local strs = {}
-                for i = 1, math.min(#args, 12) do
+                for i = 1, math.min(#args, 8) do
                     strs[i] = FormatArg(args[i])
                 end
                 local argsStr = table.concat(strs, ", ")
-
-                -- Log ke buffer file
                 if #logs >= LOG_MAX then table.remove(logs, 1) end
                 table.insert(logs, {
-                    time   = os.date("%H:%M:%S"),
-                    path   = self:GetFullName(),
-                    method = method,
-                    args   = argsStr,
+                    time=os.date("%H:%M:%S"),
+                    path=self:GetFullName(),
+                    method=method,
+                    args=argsStr,
                 })
-
-                -- FIX: update _G.DMHubRemoteData biar hub + kaitun bisa replay
+                -- update _G buat hub + kaitun replay
                 pcall(function()
                     local shared = _G.DMHubRemoteData
                     if type(shared) ~= "table" then return end
-                    local path = self:GetFullName()
-                    local cat  = remoteCat(self.Name)
+                    local cat = remoteCat(self.Name)
                     if cat == "?" then return end
+                    local path = self:GetFullName()
                     local data = shared[cat]
                     if type(data) ~= "table" then return end
                     for _, e in ipairs(data) do
                         if e.path == path then
-                            e.lastArgsRaw = args       -- raw buat fireRemote
-                            e.lastArgsStr = argsStr    -- string buat debug/kaitun learn
+                            e.lastArgsRaw = args
+                            e.lastArgsStr = argsStr
                             e.lastTime    = os.date("%H:%M:%S")
                             e.fireCount   = (e.fireCount or 0) + 1
                             break
@@ -489,10 +427,9 @@ local function initHook()
         end)
         return old(self, ...)
     end))
-    print("[FULLDUMP] Hook live AKTIF — args dishare ke _G.DMHubRemoteData")
+    print("[DUMP] Hook live AKTIF")
 end
 
--- Flush tiap 30 detik
 task.spawn(function()
     while true do
         task.wait(30)
@@ -501,149 +438,112 @@ task.spawn(function()
 end)
 
 -- ============================================================
--- UI — panel status (HP friendly)
+-- UI
 -- ============================================================
 local UI = {}
-
 local function buildUI()
-    local existing = LP:FindFirstChild("PlayerGui") and LP.PlayerGui:FindFirstChild("DumpUI")
+    local existing = LP:FindFirstChild("PlayerGui")
+        and LP.PlayerGui:FindFirstChild("DumpUI")
     if existing then existing:Destroy() end
     local PlayerGui = LP:WaitForChild("PlayerGui", 10)
     if not PlayerGui then return end
 
     local screen = Instance.new("ScreenGui")
-    screen.Name           = "DumpUI"
-    screen.ResetOnSpawn   = false
-    screen.DisplayOrder   = 995
-    screen.IgnoreGuiInset = true
-    screen.Parent         = PlayerGui
+    screen.Name="DumpUI"; screen.ResetOnSpawn=false
+    screen.DisplayOrder=995; screen.IgnoreGuiInset=true
+    screen.Parent=PlayerGui
 
     local frame = Instance.new("Frame")
-    frame.Name             = "Main"
-    frame.Size             = UDim2.new(0, 260, 0, 240)
-    frame.Position         = UDim2.new(1, -270, 0, 45)
-    frame.BackgroundColor3 = Color3.fromRGB(14, 14, 18)
-    frame.BorderSizePixel  = 0
-    frame.Active           = true
-    frame.Draggable        = true
-    frame.Parent           = screen
+    frame.Name="Main"
+    frame.Size=UDim2.new(0,260,0,240)
+    frame.Position=UDim2.new(1,-270,0,45)
+    frame.BackgroundColor3=Color3.fromRGB(14,14,18)
+    frame.BorderSizePixel=0; frame.Active=true
+    frame.Draggable=true; frame.Parent=screen
 
     local title = Instance.new("TextLabel")
-    title.Size             = UDim2.new(1, -28, 0, 24)
-    title.Position         = UDim2.new(0, 4, 0, 0)
-    title.BackgroundTransparency = 1
-    title.Text             = "FULL DUMP"
-    title.TextColor3       = Color3.fromRGB(255, 200, 120)
-    title.TextSize         = 13
-    title.Font             = Enum.Font.GothamBold
-    title.TextXAlignment   = Enum.TextXAlignment.Left
-    title.Parent           = frame
+    title.Size=UDim2.new(1,-28,0,24); title.Position=UDim2.new(0,4,0,0)
+    title.BackgroundTransparency=1; title.Text="FULL DUMP v3"
+    title.TextColor3=Color3.fromRGB(255,200,120); title.TextSize=13
+    title.Font=Enum.Font.GothamBold
+    title.TextXAlignment=Enum.TextXAlignment.Left; title.Parent=frame
 
     local closeBtn = Instance.new("TextButton")
-    closeBtn.Size          = UDim2.new(0, 24, 0, 24)
-    closeBtn.Position      = UDim2.new(1, -26, 0, 0)
-    closeBtn.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
-    closeBtn.BorderSizePixel  = 0
-    closeBtn.Text          = "X"
-    closeBtn.TextColor3    = Color3.fromRGB(255, 255, 255)
-    closeBtn.TextSize      = 11
-    closeBtn.Font          = Enum.Font.GothamBold
-    closeBtn.Parent        = frame
+    closeBtn.Size=UDim2.new(0,24,0,24); closeBtn.Position=UDim2.new(1,-26,0,0)
+    closeBtn.BackgroundColor3=Color3.fromRGB(180,50,50); closeBtn.BorderSizePixel=0
+    closeBtn.Text="X"; closeBtn.TextColor3=Color3.fromRGB(255,255,255)
+    closeBtn.TextSize=11; closeBtn.Font=Enum.Font.GothamBold; closeBtn.Parent=frame
     closeBtn.MouseButton1Click:Connect(function() screen:Destroy() end)
 
     local status = Instance.new("TextLabel")
-    status.Name             = "Status"
-    status.Size             = UDim2.new(1, -8, 0, 80)
-    status.Position         = UDim2.new(0, 4, 0, 26)
-    status.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
-    status.BorderSizePixel  = 0
-    status.Text             = "phase: idle"
-    status.TextColor3       = Color3.fromRGB(200, 220, 200)
-    status.TextSize         = 11
-    status.Font             = Enum.Font.Gotham
-    status.TextXAlignment   = Enum.TextXAlignment.Left
-    status.TextYAlignment   = Enum.TextYAlignment.Top
-    status.TextWrapped      = true
-    status.Parent           = frame
+    status.Name="Status"; status.Size=UDim2.new(1,-8,0,80)
+    status.Position=UDim2.new(0,4,0,26)
+    status.BackgroundColor3=Color3.fromRGB(30,30,38); status.BorderSizePixel=0
+    status.Text="phase: idle"; status.TextColor3=Color3.fromRGB(200,220,200)
+    status.TextSize=11; status.Font=Enum.Font.Gotham
+    status.TextXAlignment=Enum.TextXAlignment.Left
+    status.TextYAlignment=Enum.TextYAlignment.Top
+    status.TextWrapped=true; status.Parent=frame
 
     local files = Instance.new("TextLabel")
-    files.Name              = "Files"
-    files.Size              = UDim2.new(1, -8, 0, 70)
-    files.Position          = UDim2.new(0, 4, 0, 108)
-    files.BackgroundColor3  = Color3.fromRGB(30, 30, 38)
-    files.BorderSizePixel   = 0
-    files.Text              = "belum ada file"
-    files.TextColor3        = Color3.fromRGB(160, 200, 255)
-    files.TextSize          = 10
-    files.Font              = Enum.Font.Gotham
-    files.TextXAlignment    = Enum.TextXAlignment.Left
-    files.TextYAlignment    = Enum.TextYAlignment.Top
-    files.TextWrapped       = true
-    files.Parent            = frame
+    files.Name="Files"; files.Size=UDim2.new(1,-8,0,70)
+    files.Position=UDim2.new(0,4,0,108)
+    files.BackgroundColor3=Color3.fromRGB(30,30,38); files.BorderSizePixel=0
+    files.Text="belum ada file"; files.TextColor3=Color3.fromRGB(160,200,255)
+    files.TextSize=10; files.Font=Enum.Font.Gotham
+    files.TextXAlignment=Enum.TextXAlignment.Left
+    files.TextYAlignment=Enum.TextYAlignment.Top
+    files.TextWrapped=true; files.Parent=frame
 
     local reBtn = Instance.new("TextButton")
-    reBtn.Size             = UDim2.new(0, 120, 0, 30)
-    reBtn.Position         = UDim2.new(0, 4, 0, 182)
-    reBtn.BackgroundColor3 = Color3.fromRGB(40, 80, 140)
-    reBtn.BorderSizePixel  = 0
-    reBtn.Text             = "Re-Dump"
-    reBtn.TextColor3       = Color3.fromRGB(220, 220, 255)
-    reBtn.TextSize         = 12
-    reBtn.Font             = Enum.Font.GothamBold
-    reBtn.Parent           = frame
-    -- FIX: pakai task.spawn biar UI tidak freeze saat dump
+    reBtn.Size=UDim2.new(0,120,0,30); reBtn.Position=UDim2.new(0,4,0,182)
+    reBtn.BackgroundColor3=Color3.fromRGB(40,80,140); reBtn.BorderSizePixel=0
+    reBtn.Text="Re-Dump"; reBtn.TextColor3=Color3.fromRGB(220,220,255)
+    reBtn.TextSize=12; reBtn.Font=Enum.Font.GothamBold; reBtn.Parent=frame
     reBtn.MouseButton1Click:Connect(function()
-        reBtn.Text = "Dumping..."
-        reBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 30)
+        reBtn.Text="Dumping..."
+        reBtn.BackgroundColor3=Color3.fromRGB(80,80,30)
         task.spawn(function()
-            DumpState.files = {}  -- reset list file
-            DumpState.phase = "tree";    pcall(dumpTree)
-            DumpState.phase = "remotes"; pcall(dumpRemotes)
-            DumpState.phase = "stats";   pcall(dumpStats)
-            DumpState.phase = "logic";   pcall(dumpLogic)
-            DumpState.phase = "done"
-            reBtn.Text = "Re-Dump"
-            reBtn.BackgroundColor3 = Color3.fromRGB(40, 80, 140)
+            DumpState.files={}
+            DumpState.phase="tree";    pcall(dumpTree);    task.wait(0.5)
+            DumpState.phase="remotes"; pcall(dumpRemotes); task.wait(0.5)
+            DumpState.phase="stats";   pcall(dumpStats);   task.wait(0.5)
+            DumpState.phase="logic";   pcall(dumpLogic)
+            DumpState.phase="done"
+            reBtn.Text="Re-Dump"
+            reBtn.BackgroundColor3=Color3.fromRGB(40,80,140)
             notify("Re-dump selesai!", 5)
         end)
     end)
 
     local closeAll = Instance.new("TextButton")
-    closeAll.Size          = UDim2.new(0, 120, 0, 30)
-    closeAll.Position      = UDim2.new(0, 130, 0, 182)
-    closeAll.BackgroundColor3 = Color3.fromRGB(150, 60, 60)
-    closeAll.BorderSizePixel  = 0
-    closeAll.Text          = "Tutup"
-    closeAll.TextColor3    = Color3.fromRGB(255, 255, 255)
-    closeAll.TextSize      = 12
-    closeAll.Font          = Enum.Font.GothamBold
-    closeAll.Parent        = frame
+    closeAll.Size=UDim2.new(0,120,0,30); closeAll.Position=UDim2.new(0,130,0,182)
+    closeAll.BackgroundColor3=Color3.fromRGB(150,60,60); closeAll.BorderSizePixel=0
+    closeAll.Text="Tutup"; closeAll.TextColor3=Color3.fromRGB(255,255,255)
+    closeAll.TextSize=12; closeAll.Font=Enum.Font.GothamBold; closeAll.Parent=frame
     closeAll.MouseButton1Click:Connect(function() screen:Destroy() end)
 
-    UI.frame  = frame
-    UI.status = status
-    UI.files  = files
+    UI.frame=frame; UI.status=status; UI.files=files
 
-    -- Auto-refresh tiap 2 detik
     task.spawn(function()
         while screen and screen.Parent do
             task.wait(2)
             pcall(function()
-                local elapsed = math.floor(os.clock() - DumpState.startedAt)
+                local elapsed = math.floor(os.clock()-DumpState.startedAt)
                 UI.status.Text = string.format(
                     "phase: %s\nremote: %d | script: %d\nhook log: %d\nwaktu: %ds",
                     DumpState.phase, DumpState.remotes, DumpState.scripts,
                     DumpState.logsCount, elapsed)
-                local fLines = {}
+                local fLines={}
                 for _, f in ipairs(DumpState.files) do
-                    fLines[#fLines+1] = ("%s (%dKB)"):format(f.name, f.size)
+                    fLines[#fLines+1]=("%s (%dKB)"):format(f.name, f.size)
                 end
-                UI.files.Text = #fLines == 0 and "belum ada file"
-                    or table.concat(fLines, "\n")
+                UI.files.Text = #fLines==0 and "belum ada file"
+                    or table.concat(fLines,"\n")
             end)
         end
     end)
-    print("[FULLDUMP] UI aktif")
+    print("[DUMP] UI aktif")
 end
 
 task.spawn(buildUI)
@@ -652,30 +552,27 @@ task.spawn(buildUI)
 -- INIT
 -- ============================================================
 print("==========================================")
-print("  DM FULL DUMP v2 — Devil's Market")
-print("  Semua di-dump otomatis ke file txt")
+print("  DM FULL DUMP v3 LITE — Devil's Market")
+print("  crash-safe: logic dibatasi, no everything")
 print("==========================================")
 
--- Header file log
 pcall(function()
     writefile("dm_remote_logs.txt",
-        "-- DM REMOTE LOGS — " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n")
+        "-- DM REMOTE LOGS — "..os.date("%Y-%m-%d %H:%M:%S").."\n")
 end)
 
--- Urutan: instans → remote → stats → logic → hook live
 task.spawn(function()
-    DumpState.phase = "tree";    pcall(dumpTree)
-    DumpState.phase = "remotes"; pcall(dumpRemotes)
-    DumpState.phase = "stats";   pcall(dumpStats)
-    DumpState.phase = "logic";   pcall(dumpLogic)
-    DumpState.phase = "hook";    pcall(initHook)
-    DumpState.phase = "done"
+    DumpState.phase="tree";    task.wait(0.2); pcall(dumpTree)
+    DumpState.phase="remotes"; task.wait(0.2); pcall(dumpRemotes)
+    DumpState.phase="stats";   task.wait(0.2); pcall(dumpStats)
+    DumpState.phase="logic";   task.wait(0.2); pcall(dumpLogic)
+    DumpState.phase="hook";    task.wait(0.2); pcall(initHook)
+    DumpState.phase="done"
     print("==========================================")
-    print("  DUMP SELESAI. File di folder Delta:")
+    print("  DUMP SELESAI.")
     print("  dm_instances.txt  dm_remotes.txt")
     print("  dm_stats.txt      dm_logic_all.txt")
-    print("  dm_logic_everything.txt  dm_logic_*.lua")
-    print("  dm_remote_logs.txt (nambah tiap 30 detik)")
+    print("  dm_logic_*.lua    dm_remote_logs.txt")
     print("==========================================")
-    notify("Dump selesai! Buka folder Delta & kirim file-nya", 8)
+    notify("Dump selesai! Buka folder Delta", 8)
 end)
